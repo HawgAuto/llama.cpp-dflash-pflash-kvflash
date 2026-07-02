@@ -3547,6 +3547,9 @@ private:
             if (record.data.main.empty() || prefix.empty() || prefix.size() >= input_tokens.size()) {
                 continue;
             }
+            if (slot.task && prefix.size() >= (size_t) slot.task->n_tokens()) {
+                continue;
+            }
             if (best && prefix.size() <= best->prefix.size()) {
                 continue;
             }
