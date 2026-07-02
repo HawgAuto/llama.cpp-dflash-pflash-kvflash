@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """OpenAI-compatible smart router for llama-server PFlash/DFlash experiments.
 
-This helper is intended for publication as an example integration script for a
-llama.cpp-derived server with Lucebox-style PFlash/DFlash controls. It contains
+This helper is an example integration script for a llama.cpp-derived server with
+Lucebox-style PFlash/DFlash controls. It contains
 no deployment-specific paths by default; set the QWEN36_* environment variables
 for local models, ports, logs, and backend names.
 

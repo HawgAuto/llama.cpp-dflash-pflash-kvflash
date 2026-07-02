@@ -457,7 +457,7 @@ Promotion boundary:
 
 ## Promotion package - CP029/CP030
 
-Generated publishable local promotion package:
+Generated local promotion package:
 
 - Report: `pflash-promotion-package-20260630/PROMOTION_REPORT.md`.
 - Machine-readable evidence rollup: `pflash-promotion-package-20260630/promotion_evidence.json`.

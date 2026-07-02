@@ -1,6 +1,6 @@
 # Notices and attribution
 
-This repository is a publication-sanitized fork of `llama.cpp`.
+This repository is a fork of `llama.cpp`.
 
 ## Upstream project
 
