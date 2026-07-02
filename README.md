@@ -1,4 +1,4 @@
-# llama.cpp
+# llama.cpp PFlash/DFlash/KVFlash server fork
 
 ![llama](https://raw.githubusercontent.com/ggml-org/llama.brand/refs/heads/master/cover/llama-cpp/cover-llama-cpp-dark.svg)
 
@@ -10,9 +10,29 @@
 
 [Manifesto](https://github.com/ggml-org/llama.cpp/discussions/205) / [ggml](https://github.com/ggml-org/ggml) / [ops](https://github.com/ggml-org/llama.cpp/blob/master/docs/ops.md)
 
-LLM inference in C/C++
+LLM inference in C/C++ with experimental server-side PFlash, DFlash, and KVFlash work.
 
-This fork preserves upstream llama.cpp attribution and license information. See [NOTICE.md](NOTICE.md) for upstream llama.cpp credit and experimental Lucebox-style PFlash/DFlash/KVFlash lineage notes.
+This repository is a custom server-focused fork of [llama.cpp](https://github.com/ggml-org/llama.cpp). It keeps the upstream llama.cpp runtime, model support, build system, tools, and documentation, then layers experimental inference-server features on top for prompt compression, speculative decoding, KV cache residency experiments, and routing around those controls.
+
+## What is different in this fork
+
+The main additions in this fork are focused on llama-server experimentation rather than replacing the upstream llama.cpp project:
+
+- **DFlash speculative decoding controls** - server-side integration work for drafter/target speculative decoding experiments and associated observability.
+- **PFlash prompt compression hooks** - configurable paths for compressing or reducing prompt token streams before they are processed by the server.
+- **KVFlash cache-residency experiments** - prototype controls and status reporting for keeping selected KV-cache content resident, tracking dry-run scoring, candidate tokens, hits, misses, and eviction-related counters.
+- **OpenAI-compatible smart router tooling** - `tools/server/qwen36-smart-router.py` provides an example router for dispatching requests across PFlash/DFlash-aware llama-server backends.
+- **Promotion and evidence artifacts** - checkpoint patches, status notes, and local evidence rollups are included to document the experimental path and make the server changes easier to audit.
+
+These features are experimental and are not upstream llama.cpp features unless and until accepted upstream. They are intended for research, benchmarking, and server integration work.
+
+## Attribution and thanks
+
+This fork stands on the work of the upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) and [ggml](https://github.com/ggml-org/ggml) authors. The substantial runtime, backends, server infrastructure, build system, examples, and documentation come from llama.cpp and remain under the upstream MIT license.
+
+Special thanks and credit go to **Lucebox** for the PFlash and KVFlash research/prototyping lineage that informed the experimental prompt-compression and KV-cache-residency directions in this fork. The PFlash, DFlash, and KVFlash work here should be understood as experimental integration work inspired by and credited to that Lucebox lineage, layered on top of llama.cpp.
+
+See [NOTICE.md](NOTICE.md) for license and attribution details.
 
 ## Recent API changes
 
