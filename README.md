@@ -12,6 +12,8 @@
 
 LLM inference in C/C++
 
+This publication-sanitized fork preserves upstream llama.cpp attribution and license information. See [NOTICE.md](NOTICE.md) for upstream llama.cpp credit and experimental Lucebox-style PFlash/DFlash/KVFlash lineage notes.
+
 ## Recent API changes
 
 - [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)
