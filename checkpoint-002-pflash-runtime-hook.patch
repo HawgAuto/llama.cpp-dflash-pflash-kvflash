@@ -1,0 +1,209 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index c289ff7..2d8bf0f 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -1485,6 +1485,84 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.cache_idle_slots = value;
+         }
+     ).set_env("LLAMA_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kvflash"}, "N|auto",
++        "experimental: resident KVFlash pool tokens, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value == "auto") {
++                params.kvflash_tokens = -1;
++                return;
++            }
++            params.kvflash_tokens = std::stoi(value);
++            if (params.kvflash_tokens < 0) {
++                throw std::invalid_argument("kvflash must be non-negative or auto");
++            }
++        }
++    ).set_env("LLAMA_ARG_KVFLASH").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-policy"}, "POLICY",
++        "experimental: KVFlash eviction/scoring policy: lru, qk, or drafter (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "lru" && value != "qk" && value != "drafter") {
++                throw std::invalid_argument("kvflash-policy must be one of: lru, qk, drafter");
++            }
++            params.kvflash_policy = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_POLICY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-tau"}, "N",
++        string_format("experimental: KVFlash scoring/reselection interval (default: %d)", params.kvflash_tau),
++        [](common_params & params, int value) {
++            if (value <= 0) {
++                throw std::invalid_argument("kvflash-tau must be positive");
++            }
++            params.kvflash_tau = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_TAU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-drafter"}, "FNAME",
++        "experimental: KVFlash drafter model path for drafter policy (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.kvflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--prefill-drafter", "--pflash-drafter"}, "FNAME",
++        "experimental: PFlash prefill drafter model path (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.pflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-keep-ratio"}, "N",
++        string_format("experimental: PFlash prompt keep ratio (default: %.2f)", params.pflash_keep_ratio),
++        [](common_params & params, const std::string & value) {
++            params.pflash_keep_ratio = std::stof(value);
++            if (params.pflash_keep_ratio <= 0.0f || params.pflash_keep_ratio > 1.0f) {
++                throw std::invalid_argument("pflash-keep-ratio must be in (0, 1]");
++            }
++        }
++    ).set_env("LLAMA_ARG_PFLASH_KEEP_RATIO").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-mode"}, "MODE",
++        "experimental: PFlash mode: off, always, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "off" && value != "always" && value != "auto") {
++                throw std::invalid_argument("pflash-mode must be one of: off, always, auto");
++            }
++            params.pflash_mode = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_MODE").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-drafter-gpu"}, "N",
++        string_format("experimental: PFlash drafter GPU index (default: %d)", params.pflash_drafter_gpu),
++        [](common_params & params, int value) {
++            if (value < 0) {
++                throw std::invalid_argument("pflash-drafter-gpu must be non-negative");
++            }
++            params.pflash_drafter_gpu = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER_GPU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+     add_opt(common_arg(
+         {"--context-shift"},
+         {"--no-context-shift"},
+diff --git a/common/common.cpp b/common/common.cpp
+index 0dd9ede..ff11722 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -394,6 +394,19 @@ void common_params_print_info(const common_params & params, bool print_devices)
+         }
+     }
+     COM_TRC("%s\n", common_params_get_system_info(params).c_str());
++
++    if (params.kvflash_tokens != 0 || params.pflash_mode != "off" || !params.pflash_drafter.empty()) {
++        COM_INF("%s: experimental Lucebox ports: kvflash=%d policy=%s tau=%d pflash_mode=%s pflash_keep_ratio=%.3f\n",
++                __func__, params.kvflash_tokens, params.kvflash_policy.c_str(), params.kvflash_tau,
++                params.pflash_mode.c_str(), params.pflash_keep_ratio);
++        if (!params.kvflash_drafter.empty()) {
++            COM_INF("%s: experimental kvflash_drafter = %s\n", __func__, params.kvflash_drafter.c_str());
++        }
++        if (!params.pflash_drafter.empty()) {
++            COM_INF("%s: experimental pflash_drafter = %s gpu=%d\n", __func__, params.pflash_drafter.c_str(), params.pflash_drafter_gpu);
++        }
++        COM_WRN("%s", "experimental PFlash/KVFlash runtime wiring is incomplete in this checkpoint; parsed flags are no-ops unless a later patch wires them into inference\n");
++    }
+ }
+ 
+ std::string common_params_get_system_info(const common_params & params) {
+diff --git a/common/common.h b/common/common.h
+index 2adb310..94cc649 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -569,6 +569,18 @@ struct common_params {
+     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
+     bool kv_unified        = false; // enable unified KV cache
+ 
++    // Experimental Lucebox feature ports. These are parsed and reported by this
++    // fork first; runtime wiring is added behind these fields.
++    int32_t kvflash_tokens = 0;
++    int32_t kvflash_tau    = 64;
++    std::string kvflash_policy = "lru";
++    std::string kvflash_drafter = "";
++
++    std::string pflash_drafter = "";
++    float       pflash_keep_ratio = 1.0f;
++    std::string pflash_mode = "off";
++    int32_t     pflash_drafter_gpu = 0;
++
+     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
+     bool use_mmap          = true;  // enable mmap to use filesystem cache
+     bool use_direct_io     = false; // read from disk without buffering
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 06f236b..3afc229 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -18,6 +18,7 @@
+ #include "mtmd-helper.h"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <cstddef>
+ #include <cinttypes>
+ #include <exception>
+@@ -2360,6 +2361,51 @@ private:
+                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+     }
+ 
++    bool maybe_apply_pflash_prompt_compression(server_task & task) {
++        if (params_base.pflash_mode != "always") {
++            return false;
++        }
++        if (params_base.pflash_keep_ratio >= 1.0f) {
++            return false;
++        }
++        if (task.type != SERVER_TASK_TYPE_COMPLETION && task.type != SERVER_TASK_TYPE_INFILL) {
++            return false;
++        }
++        if (task.tokens.has_mtmd) {
++            SRV_WRN("PFlash compression skipped for task %d: multimodal prompts are not supported yet\n", task.id);
++            return false;
++        }
++
++        const llama_tokens & src = task.tokens.get_tokens();
++        const size_t n_src = src.size();
++        if (n_src < 4) {
++            return false;
++        }
++
++        const size_t n_keep = std::max<size_t>(2, (size_t) std::ceil((double) n_src * params_base.pflash_keep_ratio));
++        if (n_keep >= n_src) {
++            return false;
++        }
++
++        llama_tokens dst;
++        dst.reserve(n_keep);
++        dst.push_back(src.front());
++
++        const size_t n_middle = n_keep - 2;
++        for (size_t i = 0; i < n_middle; ++i) {
++            const size_t idx = 1 + ((i + 1) * (n_src - 2)) / (n_middle + 1);
++            dst.push_back(src[idx]);
++        }
++
++        dst.push_back(src.back());
++        task.tokens = server_tokens(dst, false);
++
++        SRV_WRN("experimental PFlash compressed task %d prompt tokens: %zu -> %zu, mode=%s, keep_ratio=%.3f%s\n",
++                task.id, n_src, dst.size(), params_base.pflash_mode.c_str(), params_base.pflash_keep_ratio,
++                params_base.pflash_drafter.empty() ? ", drafter=none" : ", drafter=configured-but-not-used");
++        return true;
++    }
++
+     void process_single_task(server_task && task) {
+         switch (task.type) {
+             case SERVER_TASK_TYPE_COMPLETION:
+@@ -2375,6 +2421,8 @@ private:
+                         }
+                     }
+ 
++                    maybe_apply_pflash_prompt_compression(task);
++
+                     const int id_task = task.id;
+ 
+                     server_slot * slot = get_available_slot(task);

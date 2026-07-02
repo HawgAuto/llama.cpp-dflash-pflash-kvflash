@@ -1,0 +1,737 @@
+diff --git a/PORT_STATUS.md b/PORT_STATUS.md
+new file mode 100644
+index 0000000..e8db7bb
+--- /dev/null
++++ b/PORT_STATUS.md
+@@ -0,0 +1,433 @@
++# PFlash/KVFlash Port Status
++
++## Base
++
++- Fork path: `${LLAMA_CPP_DIR}`
++- Base upstream commit: `dbdaece23de9ac63f2e7ca9e6bfcdc4fc156a3fa`
++- Branch: `local-user/dflash-pflash-kvflash`
++
++## Checkpoint 001 - CLI/config scaffold
++
++Added experimental CLI/config fields for:
++
++- `--kvflash N|auto`
++- `--kvflash-policy lru|qk|drafter`
++- `--kvflash-tau N`
++- `--kvflash-drafter FNAME`
++- `--prefill-drafter FNAME`
++- `--pflash-drafter FNAME`
++- `--pflash-keep-ratio N`
++- `--pflash-mode off|always|auto`
++- `--pflash-drafter-gpu N`
++
++These parse and log at startup. Default behavior is unchanged.
++
++## Checkpoint 002 - first PFlash runtime hook
++
++Added a narrowly gated server task hook in `tools/server/server-context.cpp`:
++
++- Only runs when `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- Only applies to completion/infill tasks.
++- Skips multimodal prompts.
++- Keeps the first and last token and uniformly samples the middle tokens down to the requested keep ratio.
++- Logs `experimental PFlash compressed task ...` when it modifies a prompt.
++
++This is not the final Lucebox drafter-driven PFlash algorithm. It is a safe integration slice that proves the upstream server can route prompt-token compression through the task boundary without changing default behavior. The next step is replacing the uniform thinning placeholder with real drafter scoring/compression.
++
++## Checkpoint 003 - PFlash drafter-helper bridge
++
++Reworked the PFlash hook so `--pflash-drafter` is no longer only a logged path:
++
++- If `--pflash-drafter` points to an executable helper, the server writes the prompt token IDs to a temporary file and runs:
++  - `<helper> <token-file> <keep-ratio> <pflash-drafter-gpu>`
++- The helper is expected to print surviving token IDs to stdout, separated by whitespace, commas, or semicolons.
++- A successful helper result replaces the prompt tokens and logs `drafter=helper`.
++- If no executable helper is configured, or the helper fails, the hook falls back to checkpoint-002 uniform compression and logs `drafter=uniform-fallback`.
++- Invalid helper output is rejected if it is empty, shorter than 2 tokens, or not actually compressed.
++
++This is a bridge for connecting the Lucebox drafter scorer/IPC daemon without pulling the whole custom backend into upstream in one patch. A true in-process GGUF drafter loader is still pending.
++
++## Checkpoint 004 - PFlash helper contract hardening
++
++Tightened the checkpoint-003 helper bridge so external drafter output cannot silently mutate prompts into an unsafe shape:
++
++- Temporary token files are now created with `mkstemp` under the system temp directory instead of a predictable `this`-pointer filename.
++- Helper output must preserve the first and last prompt token.
++- Helper output must be an ordered subsequence of the original prompt tokens.
++- Helper output must be no longer than the computed keep target from `--pflash-keep-ratio`.
++- The built-in uniform fallback now goes through the same validation path before prompt mutation.
++
++This checkpoint keeps the helper bridge external and experimental, but makes the protocol strict enough for a real Lucebox scorer/helper to plug in without accepting reordered, invented, or under-compressed token streams.
++
++## Checkpoint 005 - KVFlash visibility scaffold
++
++Started the KVFlash runtime side without changing KV-cache behavior:
++
++- Server initialization now logs whether experimental KVFlash is disabled or configured-but-not-active.
++- The `/props` response now includes a `kvflash` object with configured tokens, policy, tau, drafter, and `active=false`.
++- `--kvflash` remains a visibility/configuration scaffold only; no KV allocation, eviction, paging, attention-mask, or recall behavior is changed.
++
++This checkpoint makes KVFlash configuration observable before any risky KV-cache mutation work.
++
++## Checkpoint 006 - KVFlash resident pool skeleton
++
++Added an inert resident-pool state object for future KVFlash work:
++
++- Tracks configured capacity, resident token count, entries, hits, misses, and evictions.
++- Initializes only when `--kvflash` is configured.
++- Exposes the counters under `/props` as `kvflash.resident_pool`.
++- Logs the zeroed resident-pool counters at startup when KVFlash is configured.
++- Keeps `active=false` and does not allocate, evict, page, recall, or mutate any llama KV cache state.
++
++This checkpoint creates observable state for later dry-run scoring and eviction simulation without changing model execution.
++
++## Checkpoint 007 - KVFlash dry-run scoring hooks
++
++Added a dry-run scoring hook at the server task boundary:
++
++- Runs only when `--kvflash` is configured and only for completion/infill prompts.
++- Observes prompt length, policy, tau, and candidate-token budget before PFlash may alter the prompt.
++- Increments inert `dry_run_scores`, `dry_run_candidate_tokens`, and miss counters for visibility.
++- Exposes those counters in `/props` under `kvflash.resident_pool`.
++- Logs dry-run scoring at debug level with `active=false`.
++- Does not change task tokens, slot selection, KV cache state, attention masks, or generation behavior.
++
++This checkpoint creates the first policy-observation path needed for later eviction simulation while keeping KVFlash non-active.
++
++## Checkpoint 008 - KVFlash eviction simulation
++
++Extended the dry-run KVFlash path with eviction simulation counters:
++
++- Computes whether a prompt candidate would overflow the configured resident token budget.
++- Accumulates `simulated_eviction_checks` and `simulated_eviction_candidates` for `/props` visibility.
++- Logs simulated eviction candidates at debug level while keeping `active=false`.
++- Leaves real `entries`, `resident_tokens`, and `evictions` unchanged.
++- Does not call llama KV cache remove, clear, update, paging, or attention-mask paths.
++
++This checkpoint previews eviction pressure without performing eviction or changing generation behavior.
++
++## Checkpoint 009 - reproducible PFlash helper target
++
++Added a checked-in reference helper for the existing external PFlash helper protocol:
++
++- `tools/server/pflash-uniform-helper.py`
++- Accepts `<token-file> <keep-ratio> <pflash-drafter-gpu>`.
++- Reads one token id per line from the token file.
++- Emits a first/last-preserving ordered subsequence using the same deterministic uniform strategy as the built-in fallback.
++- Validates argument count, keep-ratio range, token-file existence, and token parsing.
++- Leaves in-process GGUF drafter loading/scoring still pending; this is a reproducible IPC/helper target for integration and testing.
++
++This checkpoint gives `--pflash-drafter` a repository-local executable target that exercises the hardened helper bridge without requiring Lucebox drafter model loading yet.
++
++## Checkpoint 010 - live model runtime validation attempt
++
++Attempted live runtime validation with the forked `build-hip-gfx1151/bin/llama-server` on port 18080 using `--no-mmap`, configured KVFlash, PFlash always mode, and the checked-in PFlash helper.
++
++Results:
++
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat.gguf` failed to load because tokenizer metadata was missing: `key not found in model: tokenizer.ggml.model`.
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat-tokenizer.gguf` failed to load because it was not a complete standalone model: `missing tensor 'fc.weight'`.
++- `qwen3.6-27b-dflash-zlab-q8_0.gguf` failed context initialization because standalone DFlash requires a paired context: `dflash requires ctx_other to be set`.
++- An existing healthy server on port 8080 was checked, but it is a separate CUDA build from `${HOME}/experiments/llamacpp-master-20260610` and does not expose this fork's KVFlash `/props` field, so it cannot validate this workspace.
++
++Live validation is therefore blocked until a standalone compatible GGUF is available for this fork, or the correct paired DFlash launch command/model set is provided. No running validation server was left behind.
++
++## Checkpoint 011 - broader test validation
++
++Built the missing CTest executables and ran broader validation:
++
++- Initial `ctest --test-dir build-hip-gfx1151 --output-on-failure` failed because test executables had not been built.
++- Built the missing test targets, then reran full CTest.
++- Full CTest exposed and fixed one real local regression: argument aliases now list `--pflash-drafter` before the longer `--prefill-drafter`, as required by `test-arg-parser`.
++- `test-arg-parser` passed after the fix.
++- Full CTest then had one remaining unrelated external-data failure: `test-tokenizers-ggml-vocabs` downloaded several invalid Git LFS pointer files and failed with `invalid magic characters: 'vers', expected 'GGUF'`.
++- The suite excluding that external-data test passed: `ctest --test-dir build-hip-gfx1151 -E '^test-tokenizers-ggml-vocabs$' --output-on-failure` reported `100% tests passed, 0 tests failed out of 53`.
++
++This is broader build/test validation for the fork. It is not live model runtime validation because Checkpoint 010 is blocked by unavailable compatible live model inputs.
++
++## Checkpoint 012 - paired DFlash live smoke validation
++
++Validated this fork with the known-good paired Qwen3.6 DFlash model set that previously benchmarked successfully on the upstream DFlash server:
++
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/models/hf-spiritbuun-qwen36-dflash/dflash-draft-3.6-q8_0.official-dflash-compat.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and the checked-in PFlash helper.
++- The legacy reference flag `-cd 4096` is not accepted by this fork's current CLI, so the successful smoke omitted it.
++- `/health` returned `{"status":"ok"}` on port 18080.
++- `/props` showed this fork's `kvflash` object with `configured=true`, `active=false`, `tokens=1024`, `policy=qk`, and initialized zeroed resident-pool counters.
++- Live `/completion` requests generated text and reported speculative DFlash timing fields, including `draft_n` and `draft_n_accepted`.
++- Server logs showed `common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'` and PFlash helper compression such as `experimental PFlash compressed task ... drafter=helper`.
++- No validation server was left running after the smoke.
++
++This checkpoint resolves the previous live-validation blocker for this fork at smoke-test scope. It is not a full benchmark pass and does not activate real KVFlash mutation; KVFlash remains configured but inactive.
++
++## Checkpoint 013 - paired DFlash live benchmark validation
++
++Ran the full six-prompt benchsplit task set against this fork with the paired Qwen3.6 DFlash model set:
++
++- Run directory: `checkpoint-013-live-bench-20260629T152302Z`.
++- Summary: `checkpoint-013-live-bench-20260629T152302Z/summary.jsonl`.
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/models/hf-spiritbuun-qwen36-dflash/dflash-draft-3.6-q8_0.official-dflash-compat.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and PFlash disabled.
++- KVFlash remained configured but inactive: `configured=true`, `active=false`, `tokens=1024`, `policy=qk`, `tau=64`.
++- All six benchmark quality checks passed:
++  - `speed-short-list`: 43 completion tokens, 17.8 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=35`, qscore 0.9.
++  - `speed-code`: 93 completion tokens, 38.4 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=85`, qscore 1.0.
++  - `speed-structured-json`: 385 completion tokens, 35.7 tok/s wall-clock, `draft_n=690`, `draft_n_accepted=340`, qscore 1.0.
++  - `reasoning-trains`: 1025 completion tokens, 25.1 tok/s wall-clock, `draft_n=2670`, `draft_n_accepted=848`, qscore 1.0.
++  - `agent-tool-decision`: 46 completion tokens, 18.2 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=38`, qscore 1.0.
++  - `long-gen-essay`: 1066 completion tokens, 12.3 tok/s wall-clock, `draft_n=5745`, `draft_n_accepted=684`, qscore 1.0.
++- Logs showed DFlash draft acceptance lines and `common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'`.
++- No validation server was left running after the benchmark.
++
++An earlier same-script attempt with `--pflash-mode always --pflash-keep-ratio 0.5` is preserved at `checkpoint-013-live-bench-20260629T152209Z`. It returned HTTP 200 for all six tasks but generated only one empty completion token per task. Logs show the uniform helper compressed chat-template token sequences, e.g. `experimental PFlash compressed task ... drafter=helper`. That run is a negative finding for the placeholder PFlash hook on chat-completion workloads, not a benchmark pass.
++
++This checkpoint validates the fork's paired DFlash path under a full six-task live benchmark. It does not validate real PFlash scoring or real KVFlash mutation; PFlash was disabled for the passing benchmark and KVFlash remained configured-but-inactive.
++
++## Checkpoint 014 - PFlash chat-template safety guard
++
++Added a narrow safety guard to the placeholder/helper PFlash hook:
++
++- PFlash prompt compression still requires `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- It now skips chat-formatted request paths before mutating prompt tokens:
++  - `TASK_RESPONSE_TYPE_OAI_CHAT`
++  - `TASK_RESPONSE_TYPE_OAI_RESP`
++  - `TASK_RESPONSE_TYPE_ANTHROPIC`
++- The skip logs: `PFlash compression skipped for task ... chat-formatted prompts are not supported yet`.
++- Native `/completion`, OAI `/v1/completions`, and infill remain eligible for the existing experimental helper/uniform compression path.
++
++Reason: Checkpoint 013 showed that uniformly compressing already-templated chat prompts can remove structurally important chat-template/control tokens and cause empty one-token completions. This guard prevents that silent benchmark-quality failure while preserving the experimental raw completion hook.
++
++Live verification:
++
++- Run directory: `checkpoint-014-pflash-chat-guard-20260629T152815Z`.
++- Launched paired DFlash with `--pflash-mode always --pflash-keep-ratio 0.5` and the checked-in helper.
++- Sent a `/v1/chat/completions` request.
++- Response returned HTTP 200 with content: `Red Blue Green Yellow Purple`.
++- Logs contained the new chat-formatted skip message.
++- Logs did not contain `experimental PFlash compressed task` for the chat request.
++- Response timings included DFlash activity with `draft_n > 0`.
++- No validation server was left running after the check.
++
++## Checkpoint 015 - Z Lab DFlash benchmark and matrix comparison
++
++Reran the six-prompt benchsplit validation against this fork using the self-made Z Lab DFlash drafter instead of the earlier SpiritBuun draft GGUF:
++
++- Run directory: `checkpoint-015-zlab-dflash-bench-20260629T154102Z`.
++- Summary: `checkpoint-015-zlab-dflash-bench-20260629T154102Z/summary.jsonl`.
++- Comparison: `checkpoint-015-zlab-dflash-bench-20260629T154102Z/comparison.json`.
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${MODEL_DIR}/z-lab-Qwen3.6-27B-DFlash/qwen3.6-27b-dflash-zlab-q8_0.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and PFlash disabled.
++- KVFlash remained configured but inactive: `--kvflash 1024 --kvflash-policy qk --kvflash-tau 64`.
++- All six benchmark quality checks passed: 2584 completion tokens in 134.231s, weighted 19.25 tok/s.
++
++Comparison against referenced matrix/baseline files:
++
++| Anchor | Pass | Tokens | Wall s | Weighted tok/s | Delta vs CP015 |
++| --- | ---: | ---: | ---: | ---: | ---: |
++| CP015 current fork + Z Lab DFlash | 6/6 | 2584 | 134.231 | 19.25 | baseline |
++| upstream_dflash_zlab_q8 reference | 6/6 | 2584 | 135.643 | 19.05 | +1.05% |
++| upstream_no_spec reference | 6/6 | 2568 | 220.250 | 11.659 | +65.11% |
++| upstream_mtp reference | 6/6 | 2710 | 179.963 | 15.059 | +27.83% |
++| matrix_lucebox_fast_recipe_prefix32 | 6/6 | 2521 | 152.672 | 16.513 | +16.57% |
++| matrix_lucebox_fast_recipe_prefix0 | 6/6 | 2521 | 153.002 | 16.477 | +16.83% |
++| matrix_lucebox_swa_ddtree | 6/6 | 2609 | 158.160 | 16.496 | +16.69% |
++| matrix_lucebox_dflash_ddtree_on | 6/6 | 2797 | 177.802 | 15.731 | +22.37% |
++| matrix_lucebox_dflash_ddtree_off | 6/6 | 2617 | 162.078 | 16.147 | +19.22% |
++| matrix_lucebox_no_dflash_no_ddtree | 6/6 | 2625 | 232.948 | 11.269 | +70.82% |
++
++Source comparison files:
++
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-matrix-20260629T010545Z/summary.jsonl`
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-rerun-20260629T015345Z/summary.jsonl`
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-dflash-zlab-q8-20260629T025201Z/summary.jsonl`
++
++This supersedes Checkpoint 013's SpiritBuun-drafter benchmark as the preferred DFlash validation baseline for this fork.
++
++## Checkpoint 016 - PFlash edge-preserving prompt compression
++
++Advanced the experimental PFlash hook beyond first/last-token preservation:
++
++- Added a shared edge-preservation rule for server validation and the reference helper.
++- PFlash compressed prompts must now preserve a prefix and suffix of up to 64 tokens, bounded by source length and keep target.
++- The built-in uniform fallback now keeps those prompt edges and only thins the middle.
++- The checked-in helper `tools/server/pflash-uniform-helper.py` now uses the same edge-preserving thinning strategy.
++- Helper output validation rejects compressed prompts that do not preserve the required prompt edges.
++- Chat-formatted prompts shorter than 128 tokens are skipped rather than compressed, because there is not enough room to preserve template/control-token edges safely.
++- Long chat-formatted prompts are now eligible for the edge-preserving experimental path.
++
++Live verification:
++
++- Run directory: `checkpoint-016-pflash-edge-guard-20260629T154539Z`.
++- Summary: `checkpoint-016-pflash-edge-guard-20260629T154539Z/summary.json`.
++- Launched paired DFlash with the Z Lab drafter, `--pflash-mode always --pflash-keep-ratio 0.5`, and `--pflash-drafter tools/server/pflash-uniform-helper.py`.
++- Short `/v1/chat/completions` request returned HTTP 200 with `red blue green` and logged the short-chat skip.
++- Long `/v1/chat/completions` request returned HTTP 200 with `The text consists of repetitive sequences of Greek letters. DONE.`
++- Logs showed `experimental PFlash compressed task ... drafter=helper` for the long chat request.
++- Logs did not show any edge-preservation rejection.
++- No validation server was left running after the check.
++
++This makes PFlash usable for bounded edge-preserved prompt compression experiments. It is still not the final Lucebox PFlash algorithm: real in-process PFlash drafter GGUF loading/scoring remains pending.
++
++## Checkpoint 017 - PFlash keep-index scorer contract
++
++Replaced the external helper's token-rewrite protocol with a keep-index scorer contract:
++
++- Helper input is now JSON with `tokens`, `keep_ratio`, `preserve_prefix`, `preserve_suffix`, and `structural_indices`.
++- Helper output is now JSON with `keep_indices` and optional `scores`.
++- The server maps keep indices back to original token IDs itself.
++- Server-side validation requires sorted unique in-range indices, preserved prompt edges, and preserved structural-token indices.
++- `tools/server/pflash-uniform-helper.py` was updated as the reference implementation for this protocol.
++
++This is the clean abstraction needed for Lucebox-style scoring: scorers choose original prompt positions; the server owns prompt mutation safety.
++
++## Checkpoint 018 - PFlash scorer backend skeleton
++
++Added an explicit scorer backend selection path:
++
++- New CLI/config field: `--pflash-model FNAME`.
++- New CLI/config field: `--pflash-score uniform|external-helper|model`.
++- Startup logging now reports PFlash mode, keep ratio, backend, helper path, model path, and whether the model path is present.
++- `external-helper` uses the JSON keep-index helper contract.
++- `model` is an in-process scorer skeleton that validates/owns the configured model path and currently uses the same deterministic keep-index heuristic as a placeholder scorer.
++- `uniform` remains available as the built-in no-helper fallback.
++
++This proves the server owns a PFlash scorer mode and model path separately from the external helper. The actual GGUF forward/scoring algorithm is still a placeholder in this checkpoint.
++
++## Checkpoint 019 - PFlash structural-token preservation
++
++Added structural preservation on top of edge preservation:
++
++- BOS/EOS/EOG/control tokens are marked structural using the llama vocab APIs.
++- Token pieces containing newline boundaries, chat sentinel fragments, role/tool words, or template-ish delimiters are marked structural.
++- Structural indices are included in helper requests.
++- Server validation rejects any scorer/helper output that drops a structural index.
++- `/props.pflash.structural_tokens` accumulates observed structural-token count.
++
++This keeps PFlash from compressing through chat/template/control structure even when the prompt is long enough to compress.
++
++## Checkpoint 020 - PFlash to KVFlash residency hints
++
++Connected the PFlash selection path to the existing inert KVFlash resident-pool scaffold:
++
++- When PFlash compresses a prompt and KVFlash is configured, the selected keep indices are recorded as residency hints.
++- `/props.pflash.kvflash_hints` and `kvflash_hint_tokens` report hint activity.
++- `/props.kvflash.resident_pool.entries` and `resident_tokens` are updated as dry-run/hint visibility counters.
++- KVFlash still reports `active=false`; this does not allocate/pin/purge llama KV cache, change attention masks, page KV blocks, or alter recall behavior yet.
++
++This is the bridge from PFlash scoring to KVFlash planning without mutating llama.cpp KV-cache internals prematurely.
++
++## Checkpoint 021 - first non-uniform model-score selector
++
++Advanced `--pflash-score model` beyond the CP018 pure-uniform placeholder:
++
++- The model backend now runs a hybrid deterministic token-importance selector instead of reusing the uniform spacing selector.
++- The selector seeds the keep set with uniform middle anchors, then fills the remaining budget with higher-scored content/structure/position tokens so coverage is not lost.
++- It still requires `--pflash-model` to point at an existing model file and reports `model_loaded=true` for that configured scorer path.
++- It keeps the same hard safety rules: preserved prompt edges, preserved structural indices, sorted unique keep indices, and server-owned token mutation.
++- `/props.pflash.model_score_tokens` and `model_score_selected_tokens` expose how many tokens the model-score path evaluated and selected.
++
++Important limitation: this is still not full GGUF/logprob Lucebox PFlash scoring. It is a scored in-process selector based on token structure/content/position so CP021 can exercise a real non-uniform selection path while the GGUF forward scoring integration remains pending.
++
++## Checkpoint 022 - stratified scored PFlash fill
++
++Reduced the CP021 model-score selector's tendency to over-cluster high-scoring middle tokens:
++
++- The model backend still preserves prompt edges and structural indices first.
++- It still seeds uniform middle anchors for broad prompt coverage.
++- The remaining scored budget is now filled from up to 32 prompt segments in round-robin order.
++- Each segment is internally ordered by the existing token-importance score, so selection remains non-uniform while covering the prompt more evenly.
++
++This is a stability step toward usable PFlash behavior after one verifier prompt shape exposed an empty-output failure with the earlier global top-k fill. It is still not full GGUF/logprob Lucebox PFlash scoring.
++
++## Checkpoint 023 - scored-selector telemetry
++
++Added `/props.pflash` telemetry for the CP022 stratified model-score path:
++
++- `model_score_anchor_tokens` counts middle coverage anchors added by the model backend.
++- `model_score_stratified_tokens` counts tokens added by the scored round-robin segment fill.
++- `model_score_segments` counts the segment buckets considered across model-score requests.
++- `model_score_nonempty_segments` counts segment buckets that had candidate tokens.
++
++This makes CP022 observable from the public server status endpoint: a verifier can now distinguish the stratified scored path from uniform selection or a silent fallback. It is still diagnostic accounting only and does not implement full GGUF/logprob Lucebox PFlash scoring.
++
++## Checkpoint 024 - Lucebox-style anchor-window selector
++
++Established the current stable PFlash selector reference for this fork:
++
++- Anchor-window selector over the token-score path.
++- Useful as the stable comparison point for later experimental selector changes.
++- Do not promote later selector patches over CP024 until robustness testing justifies it.
++
++## Checkpoint 025 - candidate exposure scoring
++
++Experimental patch only:
++
++- Kept as an investigative selector variant.
++- Do not promote over CP024.
++
++## Checkpoint 026 - PFlash debug export
++
++Added an env-gated diagnostic/export path for compressed prompts and kept spans:
++
++- Used to check exactly whether a critical line survives prompt compression before tuning selectors further.
++- Diagnostic only; not a selector promotion by itself.
++
++## Checkpoint 027 - dense fact span preservation
++
++Validated current best candidate for the raw PFlash selector path under the tested chat-template configuration:
++
++- Adds dense fact span preservation on top of the CP024 lineage.
++- CP028 apples-to-apples chat-kwargs sanity showed CP027 raw PFlash chat passed 8k, 16k, and 24k while CP024 failed the same raw PFlash chat cases.
++- CP029 critical-line robustness matrix passed 27/27 cases across 8k, 16k, and 24k contexts and 9 critical-line formats.
++- Promote CP027 over CP024 specifically for the raw PFlash selector path with `/v1/chat/completions`, `--chat-template-kwargs '{"enable_thinking":false}'`, `--pflash-score model`, and `--pflash-keep-ratio 0.10`.
++- Do not call CP027 canonical stable for every PFlash mode until broader suite validation passes.
++
++## Checkpoint 028 - chat-kwargs sanity harness
++
++Added reproducible harness:
++
++- `tools/server/bench_cp028_pflash_chat_kwargs_sanity.py`
++- Tests `/v1/chat/completions` with `--chat-template-kwargs '{"enable_thinking":false}'`.
++- Runs 8k, 16k, and 24k direct chat vs raw PFlash chat with `--pflash-mode always --pflash-keep-ratio 0.10 --pflash-score model`.
++- Records exact value checks, timings, finish reasons, completion tokens, and CP026 debug export summaries when available.
++
++Focused ad-hoc CP028 comparison results:
++
++| checkpoint | direct chat 8k/16k/24k | raw PFlash chat 8k/16k/24k | status |
++| --- | --- | --- | --- |
++| CP024 | PASS/PASS/PASS | FAIL/FAIL/FAIL | stable reference, not superseded |
++| CP027 | PASS/PASS/PASS | PASS/PASS/PASS | validated current best candidate for tested raw PFlash selector path |
++
++## Checkpoint 029 - critical-line robustness harness
++
++Added reproducible harness:
++
++- `tools/server/bench_cp029_pflash_critical_line_robustness.py`
++- Tests `/v1/chat/completions` with `--chat-template-kwargs '{"enable_thinking":false}'`.
++- Runs raw PFlash chat with `--pflash-mode always --pflash-keep-ratio 0.10 --pflash-score model`.
++- Covers 8k, 16k, and 24k contexts across 9 critical-line formats: canonical single line, JSON object, pipe-delimited, markdown table, YAML block, XML attrs, multiline equals, prose sentence, and spaced equals.
++- Records exact value checks and CP026 debug export summaries when available.
++
++Focused CP029 robustness result:
++
++- CP027 raw PFlash chat passed 27/27 cases.
++- CP026 debug export showed all expected values survived compression in 27/27 cases.
++- This validates CP027 as the current best candidate for the tested raw PFlash selector path, not as canonical stable for every PFlash mode.
++
++Promotion-gate rerun after CP029 archival:
++
++- `cmake --build build-hip-gfx1151 --target llama-server -j 8` passed.
++- CP028 rerun artifact: `temp-cp027-promotion-gate-cp028-chat-kwargs-20260629T234132Z/cp027-promotion-gate-cp028_chat_kwargs_comparison.json`.
++- CP028 rerun passed direct chat and raw PFlash chat at 8k, 16k, and 24k.
++- CP029 rerun artifact: `temp-cp027-promotion-gate-cp029-critical-line-robustness-20260629T234523Z/cp027-promotion-gate-cp029_critical_line_robustness.json`.
++- CP029 rerun passed 27/27 cases with 27/27 debug-compressed value hits.
++- Older intermediate temp/checkpoint directories were moved under `artifact-archive-cp029-promotion-20260629/`; the key CP024, CP027, CP028, and CP029 evidence directories remain at repository root.
++
++## Still pending
++
++- Replace the deterministic scored selector with real GGUF forward/logprob/importance scoring, ideally matching Lucebox PFlash semantics.
++- KVFlash real resident pool allocation, paging, attention mask integration, and recall.
++- Full benchmark matrix for DFlash only, DFlash + uniform PFlash, DFlash + scored PFlash, and DFlash + scored PFlash + KVFlash hints.
+diff --git a/tools/server/bench_cp029_pflash_critical_line_robustness.py b/tools/server/bench_cp029_pflash_critical_line_robustness.py
+new file mode 100644
+index 0000000..32cddda
+--- /dev/null
++++ b/tools/server/bench_cp029_pflash_critical_line_robustness.py
+@@ -0,0 +1,292 @@
++#!/usr/bin/env python3
++import argparse
++import json
++import os
++import subprocess
++import time
++import urllib.error
++import urllib.request
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[2]
++DEFAULT_BIN = ROOT / "build-hip-gfx1151/bin/llama-server"
++DEFAULT_TARGET = Path("${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf")
++DEFAULT_DRAFT = Path("${MODEL_DIR}/z-lab-Qwen3.6-27B-DFlash/qwen3.6-27b-dflash-zlab-q8_0.gguf")
++DEFAULT_PFLASH_MODEL = Path("${EXPERIMENTS_DIR}/lucebox-campaign/models/pflash-drafter-qwen3-0.6b-bf16/Qwen3-0.6B-BF16.gguf")
++EXPECT = {
++    "ROUTE": "/v2/inference/pflash-break-even",
++    "FUNC": "commit_prefill_compression_guard",
++    "SENTINEL": "LUCEBOX-BREAK-EVEN-PASS",
++}
++
++
++def critical_record(fmt):
++    route = EXPECT["ROUTE"]
++    func = EXPECT["FUNC"]
++    sentinel = EXPECT["SENTINEL"]
++    if fmt == "canonical_single_line":
++        return f"CRITICAL FACTS: ROUTE={route} FUNC={func} SENTINEL={sentinel}"
++    if fmt == "json_object":
++        return f'CRITICAL FACTS JSON: {{"ROUTE":"{route}","FUNC":"{func}","SENTINEL":"{sentinel}"}}'
++    if fmt == "pipe_delimited":
++        return f"CRITICAL FACTS | ROUTE={route} | FUNC={func} | SENTINEL={sentinel} |"
++    if fmt == "markdown_table":
++        return "\n".join([
++            "CRITICAL FACTS TABLE:",
++            "| ROUTE | FUNC | SENTINEL |",
++            f"| {route} | {func} | {sentinel} |",
++        ])
++    if fmt == "yaml_block":
++        return "\n".join([
++            "CRITICAL FACTS YAML:",
++            f"ROUTE: {route}",
++            f"FUNC: {func}",
++            f"SENTINEL: {sentinel}",
++        ])
++    if fmt == "xml_attrs":
++        return f'CRITICAL FACTS XML: <critical ROUTE="{route}" FUNC="{func}" SENTINEL="{sentinel}" />'
++    if fmt == "multiline_equals":
++        return "\n".join(["CRITICAL FACTS MULTILINE:", f"ROUTE={route}", f"FUNC={func}", f"SENTINEL={sentinel}"])
++    if fmt == "prose_sentence":
++        return f"CRITICAL FACTS PROSE: the route is {route}; the function is {func}; the sentinel is {sentinel}."
++    if fmt == "spaced_equals":
++        return f"CRITICAL FACTS SPACED: ROUTE = {route}    FUNC = {func}    SENTINEL = {sentinel}"
++    raise ValueError(f"unknown critical-line format: {fmt}")
++
++
++def make_prompt(n, fmt):
++    record = critical_record(fmt)
++    blocks = max(1, n // 70)
++    mid = blocks // 2
++    lines = [
++        "You are running an exact retrieval benchmark.",
++        "Return only: ROUTE=<value> FUNC=<value> SENTINEL=<value>",
++        "Ignore all decoy ROUTE/FUNC/SENTINEL fields unless in the critical record.",
++    ]
++    for i in range(blocks):
++        if i == mid:
++            lines.append(record)
++        lines.append(f"before block {i:05d}: unrelated filler with ROUTE=neutral FUNC=filler SENTINEL=decoy-{i:05d}.")
++        lines.append(f"after block {i:05d}: unrelated filler with ROUTE=neutral FUNC=filler SENTINEL=decoy-{i:05d}.")
++    lines.append("Now output the exact critical facts values only, no prose.")
++    return "\n".join(lines), record
++
++
++def http_json(url, payload, timeout=600):
++    req = urllib.request.Request(
++        url,
++        data=json.dumps(payload).encode(),
++        headers={"Content-Type": "application/json"},
++    )
++    t0 = time.monotonic()
++    with urllib.request.urlopen(req, timeout=timeout) as r:
++        body = r.read().decode("utf-8", "replace")
++    return json.loads(body), time.monotonic() - t0
++
++
++def wait_ready(port, proc, log_path):
++    deadline = time.monotonic() + 240
++    while time.monotonic() < deadline:
++        if proc.poll() is not None:
++            tail = log_path.read_text(errors="replace")[-5000:] if log_path.exists() else ""
++            raise RuntimeError(f"server exited {proc.returncode}\n{tail}")
++        try:
++            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
++                if r.status == 200:
++                    return
++        except Exception:
++            time.sleep(1)
++    raise RuntimeError("health timeout")
++
++
++def start_server(args):
++    log_path = args.log_dir / "pflash_robustness.server.log"
++    log = open(log_path, "w")
++    env = os.environ.copy()
++    env["LD_LIBRARY_PATH"] = str(args.server_bin.parent) + ":/opt/rocm/lib:" + env.get("LD_LIBRARY_PATH", "")
++    export_dir = args.debug_dir / "pflash_robustness"
++    export_dir.mkdir(parents=True, exist_ok=True)
++    env["LLAMA_PFLASH_DEBUG_EXPORT_DIR"] = str(export_dir)
++    cmd = args.common_server_args + [
++        "--port", str(args.port),
++        "--pflash-mode", "always",
++        "--pflash-keep-ratio", "0.10",
++        "--pflash-score", "model",
++        "--pflash-model", str(args.pflash_model),
++    ]
++    proc = subprocess.Popen(cmd, cwd=args.root, env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
++    wait_ready(args.port, proc, log_path)
++    return proc, log, cmd
++
++
++def stop_server(proc, log):
++    if proc.poll() is None:
++        proc.terminate()
++        try:
++            proc.wait(20)
++        except subprocess.TimeoutExpired:
++            proc.kill()
++            proc.wait(20)
++    log.close()
++
++
++def extract_text(obj):
++    choice = (obj.get("choices") or [{}])[0]
++    msg = choice.get("message") or {}
++    return "\n".join(x for x in (msg.get("content"), msg.get("reasoning_content"), choice.get("text")) if x)
++
++
++def check_text(text):
++    return {k: v in text for k, v in EXPECT.items()}
++
++
++def run_one(args, fmt, n):
++    prompt, record = make_prompt(n, fmt)
++    payload = {
++        "model": "bench",
++        "messages": [{"role": "user", "content": prompt}],
++        "temperature": 0,
++        "max_tokens": args.max_tokens,
++        "stream": False,
++        "cache_prompt": False,
++    }
++    obj, wall = http_json(f"http://127.0.0.1:{args.port}/v1/chat/completions", payload)
++    text = extract_text(obj)
++    stem = f"pflash_{fmt}_{n}"
++    (args.out_dir / f"{stem}.raw.json").write_text(json.dumps(obj, indent=2))
++    (args.out_dir / f"{stem}.txt").write_text(text)
++    choice = (obj.get("choices") or [{}])[0]
++    checks = check_text(text)
++    return {
++        "format": fmt,
++        "approx_tokens": n,
++        "ok": all(checks.values()),
++        "checks": checks,
++        "wall_s": round(wall, 3),
++        "finish_reason": choice.get("finish_reason"),
++        "usage": obj.get("usage"),
++        "preview": text[:500],
++        "critical_record": record,
++    }
++
++
++def debug_summary(debug_dir):
++    rows = []
++    for path in sorted(debug_dir.glob("**/pflash-task-*.json")):
++        data = json.loads(path.read_text(errors="replace"))
++        original = data.get("original_prompt") or ""
++        compressed = data.get("compressed_prompt") or ""
++        values = {k: v in compressed for k, v in EXPECT.items()}
++        rows.append({
++            "file": str(path.relative_to(debug_dir.parent)),
++            "original_tokens": data.get("original_tokens"),
++            "kept_tokens": data.get("kept_tokens"),
++            "values_in_compressed": values,
++            "all_values_in_compressed": all(values.values()),
++            "all_values_in_original": all(v in original for v in EXPECT.values()),
++        })
++    return rows
++
++
++def parse_args():
++    p = argparse.ArgumentParser(description="CP029 PFlash critical-line format robustness harness")
++    p.add_argument("--label", default="cp029")
++    p.add_argument("--server-bin", type=Path, default=DEFAULT_BIN)
++    p.add_argument("--target", type=Path, default=DEFAULT_TARGET)
++    p.add_argument("--draft", type=Path, default=DEFAULT_DRAFT)
++    p.add_argument("--pflash-model", type=Path, default=DEFAULT_PFLASH_MODEL)
++    p.add_argument("--port", type=int, default=18147)
++    p.add_argument("--max-tokens", type=int, default=96)
++    p.add_argument("--contexts", default="8000,16000,24000")
++    p.add_argument("--formats", default="canonical_single_line,json_object,pipe_delimited,markdown_table,yaml_block,xml_attrs,multiline_equals,prose_sentence,spaced_equals")
++    p.add_argument("--run-dir", type=Path)
++    args = p.parse_args()
++    args.root = ROOT
++    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
++    args.run_dir = args.run_dir or ROOT / f"temp-{args.label}-critical-line-robustness-{stamp}"
++    args.log_dir = args.run_dir / "logs"
++    args.out_dir = args.run_dir / "outputs"
++    args.debug_dir = args.run_dir / "debug_export"
++    for d in (args.log_dir, args.out_dir, args.debug_dir):
++        d.mkdir(parents=True, exist_ok=True)
++    args.context_list = [int(x) for x in args.contexts.split(",") if x]
++    args.format_list = [x for x in args.formats.split(",") if x]
++    args.common_server_args = [
++        str(args.server_bin),
++        "-m", str(args.target),
++        "-md", str(args.draft),
++        "--host", "127.0.0.1",
++        "--ctx-size", "32768",
++        "--predict", "256",
++        "--no-mmap",
++        "--jinja",
++        "--chat-template-kwargs", '{"enable_thinking":false}',
++        "--cache-type-k", "q8_0",
++        "--cache-type-v", "q8_0",
++        "--spec-type", "draft-dflash",
++        "--spec-draft-n-max", "15",
++        "--alias", "bench",
++        "--kvflash", "1024",
++        "--kvflash-policy", "qk",
++        "--kvflash-tau", "64",
++    ]
++    return args
++
++
++def assert_port_free(port):
++    try:
++        urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1)
++        raise SystemExit(f"port {port} busy")
++    except urllib.error.URLError:
++        pass
++
++
++def main():
++    args = parse_args()
++    assert_port_free(args.port)
++    proc, log, pflash_args = start_server(args)
++    try:
++        rows = []
++        for fmt in args.format_list:
++            for n in args.context_list:
++                row = run_one(args, fmt, n)
++                rows.append(row)
++                print(json.dumps(row), flush=True)
++    finally:
++        stop_server(proc, log)
++
++    debug_rows = debug_summary(args.debug_dir)
++    cases = len(rows)
++    passed = sum(1 for r in rows if r["ok"])
++    failed = cases - passed
++    debug_all = sum(1 for r in debug_rows if r["all_values_in_compressed"])
++    result = {
++        "status": "ok" if failed == 0 else "fail",
++        "label": args.label,
++        "note": "Focused CP029 robustness harness; not canonical suite green.",
++        "endpoint": "/v1/chat/completions",
++        "chat_template_kwargs": {"enable_thinking": False},
++        "pflash": {"mode": "always", "keep_ratio": 0.10, "score": "model"},
++        "contexts": args.context_list,
++        "formats": args.format_list,
++        "run_dir": str(args.run_dir),
++        "pflash_args": pflash_args,
++        "rows": rows,
++        "debug_exports": debug_rows,
++        "summary": {
++            "cases": cases,
++            "passed": passed,
++            "failed": failed,
++            "debug_exports": len(debug_rows),
++            "debug_all_values_in_compressed": debug_all,
++        },
++    }
++    out = args.run_dir / f"{args.label}_critical_line_robustness.json"
++    out.write_text(json.dumps(result, indent=2))
++    print(json.dumps({"status": result["status"], "result": str(out), "run_dir": str(args.run_dir), "summary": result["summary"]}, indent=2))
++    if failed:
++        raise SystemExit(1)
++
++
++if __name__ == "__main__":
++    main()

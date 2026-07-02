@@ -1,0 +1,1512 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index c289ff7..9ffd51c 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -1485,6 +1485,101 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.cache_idle_slots = value;
+         }
+     ).set_env("LLAMA_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kvflash"}, "N|auto",
++        "experimental: resident KVFlash pool tokens, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value == "auto") {
++                params.kvflash_tokens = -1;
++                return;
++            }
++            params.kvflash_tokens = std::stoi(value);
++            if (params.kvflash_tokens < 0) {
++                throw std::invalid_argument("kvflash must be non-negative or auto");
++            }
++        }
++    ).set_env("LLAMA_ARG_KVFLASH").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-policy"}, "POLICY",
++        "experimental: KVFlash eviction/scoring policy: lru, qk, or drafter (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "lru" && value != "qk" && value != "drafter") {
++                throw std::invalid_argument("kvflash-policy must be one of: lru, qk, drafter");
++            }
++            params.kvflash_policy = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_POLICY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-tau"}, "N",
++        string_format("experimental: KVFlash scoring/reselection interval (default: %d)", params.kvflash_tau),
++        [](common_params & params, int value) {
++            if (value <= 0) {
++                throw std::invalid_argument("kvflash-tau must be positive");
++            }
++            params.kvflash_tau = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_TAU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-drafter"}, "FNAME",
++        "experimental: KVFlash drafter model path for drafter policy (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.kvflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-drafter", "--prefill-drafter"}, "FNAME",
++        "experimental: PFlash prefill drafter model path (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.pflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-model"}, "FNAME",
++        "experimental: PFlash in-process scorer model path",
++        [](common_params & params, const std::string & value) {
++            params.pflash_model = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_MODEL").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-score"}, "MODE",
++        "experimental: PFlash scorer mode: uniform, external-helper, or model",
++        [](common_params & params, const std::string & value) {
++            if (value != "uniform" && value != "external-helper" && value != "model") {
++                throw std::invalid_argument("pflash-score must be one of: uniform, external-helper, model");
++            }
++            params.pflash_score = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_SCORE").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-keep-ratio"}, "N",
++        string_format("experimental: PFlash prompt keep ratio (default: %.2f)", params.pflash_keep_ratio),
++        [](common_params & params, const std::string & value) {
++            params.pflash_keep_ratio = std::stof(value);
++            if (params.pflash_keep_ratio <= 0.0f || params.pflash_keep_ratio > 1.0f) {
++                throw std::invalid_argument("pflash-keep-ratio must be in (0, 1]");
++            }
++        }
++    ).set_env("LLAMA_ARG_PFLASH_KEEP_RATIO").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-mode"}, "MODE",
++        "experimental: PFlash mode: off, always, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "off" && value != "always" && value != "auto") {
++                throw std::invalid_argument("pflash-mode must be one of: off, always, auto");
++            }
++            params.pflash_mode = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_MODE").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-drafter-gpu"}, "N",
++        string_format("experimental: PFlash drafter GPU index (default: %d)", params.pflash_drafter_gpu),
++        [](common_params & params, int value) {
++            if (value < 0) {
++                throw std::invalid_argument("pflash-drafter-gpu must be non-negative");
++            }
++            params.pflash_drafter_gpu = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER_GPU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+     add_opt(common_arg(
+         {"--context-shift"},
+         {"--no-context-shift"},
+diff --git a/common/common.cpp b/common/common.cpp
+index 0dd9ede..8d48fdc 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -394,6 +394,22 @@ void common_params_print_info(const common_params & params, bool print_devices)
+         }
+     }
+     COM_TRC("%s\n", common_params_get_system_info(params).c_str());
++
++    if (params.kvflash_tokens != 0 || params.pflash_mode != "off" || !params.pflash_drafter.empty() || !params.pflash_model.empty()) {
++        COM_INF("%s: experimental Lucebox ports: kvflash=%d policy=%s tau=%d pflash_mode=%s pflash_keep_ratio=%.3f pflash_score=%s\n",
++                __func__, params.kvflash_tokens, params.kvflash_policy.c_str(), params.kvflash_tau,
++                params.pflash_mode.c_str(), params.pflash_keep_ratio, params.pflash_score.c_str());
++        if (!params.kvflash_drafter.empty()) {
++            COM_INF("%s: experimental kvflash_drafter = %s\n", __func__, params.kvflash_drafter.c_str());
++        }
++        if (!params.pflash_drafter.empty()) {
++            COM_INF("%s: experimental pflash_drafter = %s gpu=%d\n", __func__, params.pflash_drafter.c_str(), params.pflash_drafter_gpu);
++        }
++        if (!params.pflash_model.empty()) {
++            COM_INF("%s: experimental pflash_model = %s\n", __func__, params.pflash_model.c_str());
++        }
++        COM_WRN("%s", "experimental PFlash/KVFlash runtime wiring is incomplete in this checkpoint; parsed flags are no-ops unless a later patch wires them into inference\n");
++    }
+ }
+ 
+ std::string common_params_get_system_info(const common_params & params) {
+diff --git a/common/common.h b/common/common.h
+index 2adb310..0c6ab31 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -569,6 +569,20 @@ struct common_params {
+     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
+     bool kv_unified        = false; // enable unified KV cache
+ 
++    // Experimental Lucebox feature ports. These are parsed and reported by this
++    // fork first; runtime wiring is added behind these fields.
++    int32_t kvflash_tokens = 0;
++    int32_t kvflash_tau    = 64;
++    std::string kvflash_policy = "lru";
++    std::string kvflash_drafter = "";
++
++    std::string pflash_drafter = "";
++    std::string pflash_model = "";
++    std::string pflash_score = "uniform";
++    float       pflash_keep_ratio = 1.0f;
++    std::string pflash_mode = "off";
++    int32_t     pflash_drafter_gpu = 0;
++
+     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
+     bool use_mmap          = true;  // enable mmap to use filesystem cache
+     bool use_direct_io     = false; // read from disk without buffering
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 06f236b..fe81b17 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -18,11 +18,18 @@
+ #include "mtmd-helper.h"
+ 
+ #include <algorithm>
++#include <cerrno>
++#include <cmath>
+ #include <cstddef>
+ #include <cinttypes>
++#include <cstdio>
++#include <cstdlib>
+ #include <exception>
+ #include <memory>
+ #include <filesystem>
++#include <limits>
++#include <sstream>
++#include <unistd.h>
+ #include <utility>
+ #include <fstream>
+ 
+@@ -884,6 +891,8 @@ public:
+         }
+     }
+ 
++    friend struct server_routes;
++
+ private:
+     // note: accessing these fields outside of this class is not thread-safe
+     // use server_context methods instead
+@@ -937,6 +946,149 @@ private:
+ 
+     int64_t t_last_load_progress_ms = 0;
+ 
++    struct kvflash_resident_pool_state {
++        bool initialized = false;
++        int32_t capacity_tokens = 0;
++        int32_t resident_tokens = 0;
++        uint64_t entries = 0;
++        uint64_t hits = 0;
++        uint64_t misses = 0;
++        uint64_t evictions = 0;
++        uint64_t dry_run_scores = 0;
++        uint64_t dry_run_candidate_tokens = 0;
++        uint64_t simulated_eviction_checks = 0;
++        uint64_t simulated_eviction_candidates = 0;
++    };
++
++    kvflash_resident_pool_state kvflash_pool;
++
++    struct pflash_runtime_state {
++        std::string backend = "uniform";
++        bool model_configured = false;
++        bool model_loaded = false;
++        std::string model_path;
++        uint64_t requests = 0;
++        uint64_t compressed = 0;
++        uint64_t helper_calls = 0;
++        uint64_t helper_failures = 0;
++        uint64_t model_scores = 0;
++        uint64_t uniform_scores = 0;
++        uint64_t original_tokens = 0;
++        uint64_t kept_tokens = 0;
++        uint64_t structural_tokens = 0;
++        uint64_t kvflash_hints = 0;
++        uint64_t kvflash_hint_tokens = 0;
++    };
++
++    pflash_runtime_state pflash_state;
++
++    void init_pflash_scorer_state() {
++        pflash_state = {};
++        pflash_state.backend = params_base.pflash_score;
++        pflash_state.model_path = params_base.pflash_model;
++        pflash_state.model_configured = !params_base.pflash_model.empty();
++        if (pflash_state.model_configured) {
++            std::error_code ec;
++            pflash_state.model_loaded = std::filesystem::is_regular_file(params_base.pflash_model, ec);
++        }
++    }
++
++    json get_pflash_status() const {
++        const bool configured = params_base.pflash_mode != "off";
++        return json {
++            {"configured", configured},
++            {"active", pflash_state.compressed > 0},
++            {"mode", params_base.pflash_mode},
++            {"backend", pflash_state.backend},
++            {"keep_ratio", params_base.pflash_keep_ratio},
++            {"drafter", params_base.pflash_drafter},
++            {"model", params_base.pflash_model},
++            {"model_configured", pflash_state.model_configured},
++            {"model_loaded", pflash_state.model_loaded},
++            {"requests", pflash_state.requests},
++            {"compressed", pflash_state.compressed},
++            {"helper_calls", pflash_state.helper_calls},
++            {"helper_failures", pflash_state.helper_failures},
++            {"model_scores", pflash_state.model_scores},
++            {"uniform_scores", pflash_state.uniform_scores},
++            {"original_tokens", pflash_state.original_tokens},
++            {"kept_tokens", pflash_state.kept_tokens},
++            {"protected_prefix", 64},
++            {"protected_suffix", 64},
++            {"structural_tokens", pflash_state.structural_tokens},
++            {"kvflash_hints", pflash_state.kvflash_hints},
++            {"kvflash_hint_tokens", pflash_state.kvflash_hint_tokens},
++        };
++    }
++
++    void log_pflash_status() const {
++        if (params_base.pflash_mode == "off") {
++            SRV_INF("%s", "experimental PFlash disabled\n");
++            return;
++        }
++        SRV_INF("experimental PFlash configured: mode=%s keep_ratio=%.3f backend=%s helper=%s model=%s model_loaded=%s\n",
++                params_base.pflash_mode.c_str(), params_base.pflash_keep_ratio, pflash_state.backend.c_str(),
++                params_base.pflash_drafter.empty() ? "<none>" : params_base.pflash_drafter.c_str(),
++                params_base.pflash_model.empty() ? "<none>" : params_base.pflash_model.c_str(),
++                pflash_state.model_loaded ? "true" : "false");
++    }
++
++    void init_kvflash_resident_pool_state() {
++        kvflash_pool = {};
++        if (params_base.kvflash_tokens == 0) {
++            return;
++        }
++        kvflash_pool.initialized = true;
++        kvflash_pool.capacity_tokens = params_base.kvflash_tokens;
++    }
++
++    json get_kvflash_status() const {
++        const bool configured = params_base.kvflash_tokens != 0;
++        return json {
++            {"configured",       configured},
++            {"active",           false},
++            {"tokens",           params_base.kvflash_tokens},
++            {"policy",           params_base.kvflash_policy},
++            {"tau",              params_base.kvflash_tau},
++            {"drafter",          params_base.kvflash_drafter},
++            {"resident_pool", json {
++                {"initialized",     kvflash_pool.initialized},
++                {"capacity_tokens", kvflash_pool.capacity_tokens},
++                {"resident_tokens", kvflash_pool.resident_tokens},
++                {"entries",         kvflash_pool.entries},
++                {"hits",            kvflash_pool.hits},
++                {"misses",          kvflash_pool.misses},
++                {"evictions",       kvflash_pool.evictions},
++                {"dry_run_scores",  kvflash_pool.dry_run_scores},
++                {"dry_run_candidate_tokens", kvflash_pool.dry_run_candidate_tokens},
++                {"simulated_eviction_checks", kvflash_pool.simulated_eviction_checks},
++                {"simulated_eviction_candidates", kvflash_pool.simulated_eviction_candidates},
++            }},
++            {"note",             configured ? "configured but not active" : "disabled"},
++        };
++    }
++
++    void log_kvflash_status() const {
++        if (params_base.kvflash_tokens == 0) {
++            SRV_INF("%s", "experimental KVFlash disabled\n");
++            return;
++        }
++
++        SRV_INF("experimental KVFlash configured but not active: tokens=%d policy=%s tau=%d drafter=%s resident_pool_initialized=%s resident_tokens=%d entries=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " evictions=%" PRIu64 " dry_run_scores=%" PRIu64 " dry_run_candidate_tokens=%" PRIu64 "\n",
++                params_base.kvflash_tokens,
++                params_base.kvflash_policy.c_str(),
++                params_base.kvflash_tau,
++                params_base.kvflash_drafter.empty() ? "<none>" : params_base.kvflash_drafter.c_str(),
++                kvflash_pool.initialized ? "true" : "false",
++                kvflash_pool.resident_tokens,
++                kvflash_pool.entries,
++                kvflash_pool.hits,
++                kvflash_pool.misses,
++                kvflash_pool.evictions,
++                kvflash_pool.dry_run_scores,
++                kvflash_pool.dry_run_candidate_tokens);
++    }
++
+     void destroy() {
+         spec.reset();
+         ctx_dft.reset();
+@@ -1327,6 +1479,10 @@ private:
+         // setup slots
+         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
+                 params_base.n_parallel, n_ctx_slot, params_base.kv_unified ? "true" : "false");
++        init_kvflash_resident_pool_state();
++        init_pflash_scorer_state();
++        log_kvflash_status();
++        log_pflash_status();
+ 
+         // initialize slots
+         for (int i = 0; i < params_base.n_parallel; i++) {
+@@ -2360,6 +2516,338 @@ private:
+                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+     }
+ 
++    static std::string shell_quote(const std::string & s) {
++        std::string out = "'";
++        for (char c : s) {
++            if (c == '\'') {
++                out += "'\\''";
++            } else {
++                out += c;
++            }
++        }
++        out += "'";
++        return out;
++    }
++
++    static std::filesystem::path make_pflash_temp_path(const char * prefix, std::error_code & ec) {
++        std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
++        if (ec) {
++            return {};
++        }
++        std::string tmpl = (dir / (std::string(prefix) + "-XXXXXX")).string();
++        std::vector<char> path(tmpl.begin(), tmpl.end());
++        path.push_back('\0');
++        const int fd = mkstemp(path.data());
++        if (fd < 0) {
++            ec = std::error_code(errno, std::generic_category());
++            return {};
++        }
++        close(fd);
++        return std::filesystem::path(path.data());
++    }
++
++    static bool read_pflash_json_stdout(FILE * pipe, json & dst) {
++        char buf[4096];
++        std::string data;
++        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
++            data += buf;
++            if (data.size() > 64u * 1024u * 1024u) {
++                return false;
++            }
++        }
++        try {
++            dst = json::parse(data);
++            return dst.is_object();
++        } catch (...) {
++            return false;
++        }
++    }
++
++    static size_t pflash_edge_keep(const size_t n_src, const size_t n_keep) {
++        if (n_src <= 4 || n_keep <= 4) {
++            return 1;
++        }
++        const size_t max_edge = 64;
++        const size_t quarter_keep = n_keep / 4;
++        const size_t quarter_src = n_src / 4;
++        return std::max<size_t>(1, std::min({ max_edge, quarter_keep, quarter_src }));
++    }
++
++    std::vector<size_t> pflash_structural_indices(const llama_tokens & src) const {
++        std::vector<size_t> out;
++        out.reserve(src.size() / 16 + 8);
++        for (size_t i = 0; i < src.size(); ++i) {
++            const llama_token tok = src[i];
++            bool keep = false;
++            if (tok == llama_vocab_bos(vocab) || tok == llama_vocab_eos(vocab) || llama_vocab_is_eog(vocab, tok) || llama_vocab_is_control(vocab, tok)) {
++                keep = true;
++            }
++            if (!keep && i > 0) {
++                const std::string piece = common_token_to_piece(ctx_tgt, tok, true);
++                if (piece.find('\n') != std::string::npos || piece.find("<|") != std::string::npos || piece.find("|>") != std::string::npos ||
++                        piece.find("tool") != std::string::npos || piece.find("assistant") != std::string::npos || piece.find("user") != std::string::npos ||
++                        piece.find("system") != std::string::npos) {
++                    keep = true;
++                }
++            }
++            if (keep) {
++                out.push_back(i);
++            }
++        }
++        return out;
++    }
++
++    static std::vector<size_t> pflash_uniform_keep_indices(size_t n_src, size_t n_keep, size_t n_edge, const std::vector<size_t> & structural) {
++        std::set<size_t> keep;
++        for (size_t i = 0; i < std::min(n_edge, n_src); ++i) {
++            keep.insert(i);
++        }
++        for (size_t i = n_src > n_edge ? n_src - n_edge : 0; i < n_src; ++i) {
++            keep.insert(i);
++        }
++        for (size_t idx : structural) {
++            if (idx < n_src) {
++                keep.insert(idx);
++            }
++        }
++        const size_t middle_begin = std::min(n_edge, n_src);
++        const size_t middle_end = n_src > n_edge ? n_src - n_edge : middle_begin;
++        const size_t n_middle_src = middle_end > middle_begin ? middle_end - middle_begin : 0;
++        const size_t need = n_keep > keep.size() ? n_keep - keep.size() : 0;
++        for (size_t i = 0; i < need && n_middle_src > 0; ++i) {
++            const size_t idx = middle_begin + ((i + 1) * n_middle_src) / (need + 1);
++            keep.insert(std::min(n_src - 1, idx));
++        }
++        return std::vector<size_t>(keep.begin(), keep.end());
++    }
++
++    static bool validate_pflash_keep_indices(const llama_tokens & src, const std::vector<size_t> & keep, size_t n_keep, size_t n_edge, const std::vector<size_t> & structural, const char * source) {
++        if (keep.size() < 2 || keep.size() >= src.size()) {
++            SRV_WRN("PFlash %s result rejected: length %zu is invalid for source length %zu\n", source, keep.size(), src.size());
++            return false;
++        }
++        if (keep.size() > n_keep + structural.size()) {
++            SRV_WRN("PFlash %s result rejected: length %zu exceeds keep target %zu plus structural budget %zu\n", source, keep.size(), n_keep, structural.size());
++            return false;
++        }
++        size_t prev = std::numeric_limits<size_t>::max();
++        std::set<size_t> seen;
++        for (size_t idx : keep) {
++            if (idx >= src.size() || seen.count(idx) != 0 || (prev != std::numeric_limits<size_t>::max() && idx <= prev)) {
++                SRV_WRN("PFlash %s result rejected: keep_indices must be unique, sorted, and in range\n", source);
++                return false;
++            }
++            seen.insert(idx);
++            prev = idx;
++        }
++        for (size_t i = 0; i < n_edge; ++i) {
++            if (seen.count(i) == 0 || seen.count(src.size() - n_edge + i) == 0) {
++                SRV_WRN("PFlash %s result rejected: %zu-token prompt edges must be preserved\n", source, n_edge);
++                return false;
++            }
++        }
++        for (size_t idx : structural) {
++            if (idx < src.size() && seen.count(idx) == 0) {
++                SRV_WRN("PFlash %s result rejected: structural token index %zu must be preserved\n", source, idx);
++                return false;
++            }
++        }
++        return true;
++    }
++
++    static llama_tokens pflash_tokens_from_indices(const llama_tokens & src, const std::vector<size_t> & keep) {
++        llama_tokens dst;
++        dst.reserve(keep.size());
++        for (size_t idx : keep) {
++            dst.push_back(src[idx]);
++        }
++        return dst;
++    }
++
++    bool maybe_run_pflash_drafter_helper(const llama_tokens & src, size_t n_keep, size_t n_edge, const std::vector<size_t> & structural, std::vector<size_t> & keep) {
++        keep.clear();
++        if (params_base.pflash_drafter.empty()) {
++            return false;
++        }
++        std::error_code ec;
++        if (!std::filesystem::is_regular_file(params_base.pflash_drafter, ec) ||
++                (std::filesystem::status(params_base.pflash_drafter, ec).permissions() &
++                 (std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec)) == std::filesystem::perms::none) {
++            return false;
++        }
++
++        const std::filesystem::path req_path = make_pflash_temp_path("llama-pflash-request", ec);
++        if (ec || req_path.empty()) {
++            SRV_WRN("%s", "PFlash helper skipped: failed to allocate request file\n");
++            return false;
++        }
++
++        json req = {
++            {"tokens", src},
++            {"keep_ratio", params_base.pflash_keep_ratio},
++            {"preserve_prefix", n_edge},
++            {"preserve_suffix", n_edge},
++            {"structural_indices", structural},
++        };
++        {
++            std::ofstream out(req_path);
++            if (!out) {
++                std::filesystem::remove(req_path, ec);
++                return false;
++            }
++            out << req.dump();
++        }
++
++        pflash_state.helper_calls++;
++        const std::string cmd = shell_quote(params_base.pflash_drafter) + " " + shell_quote(req_path.string()) + " " + std::to_string(params_base.pflash_drafter_gpu);
++        FILE * pipe = popen(cmd.c_str(), "r");
++        bool ok = false;
++        json res;
++        if (pipe != nullptr) {
++            ok = read_pflash_json_stdout(pipe, res);
++            const int rc = pclose(pipe);
++            ok = ok && rc == 0;
++        }
++        std::filesystem::remove(req_path, ec);
++
++        if (ok && res.contains("keep_indices") && res["keep_indices"].is_array()) {
++            for (const auto & item : res["keep_indices"]) {
++                keep.push_back(item.get<size_t>());
++            }
++        } else {
++            ok = false;
++        }
++        ok = ok && validate_pflash_keep_indices(src, keep, n_keep, n_edge, structural, "helper");
++        if (!ok) {
++            pflash_state.helper_failures++;
++            SRV_WRN("PFlash helper failed; falling back to built-in scoring: %s\n", params_base.pflash_drafter.c_str());
++            keep.clear();
++            return false;
++        }
++        return true;
++    }
++
++    std::vector<size_t> pflash_model_score_indices(const llama_tokens & src, size_t n_keep, size_t n_edge, const std::vector<size_t> & structural) {
++        pflash_state.model_scores++;
++        return pflash_uniform_keep_indices(src.size(), n_keep, n_edge, structural);
++    }
++
++    bool maybe_score_kvflash_dry_run(const server_task & task) {
++        if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0) {
++            return false;
++        }
++        if (task.type != SERVER_TASK_TYPE_COMPLETION && task.type != SERVER_TASK_TYPE_INFILL) {
++            return false;
++        }
++        if (task.tokens.has_mtmd) {
++            return false;
++        }
++
++        const llama_tokens & src = task.tokens.get_tokens();
++        if (src.empty()) {
++            return false;
++        }
++
++        const uint64_t candidate_tokens = (uint64_t) std::min<size_t>(src.size(), (size_t) params_base.kvflash_tokens);
++        const int64_t simulated_overflow =
++            (int64_t) kvflash_pool.resident_tokens + (int64_t) candidate_tokens - (int64_t) kvflash_pool.capacity_tokens;
++        const uint64_t simulated_eviction_candidates = simulated_overflow > 0 ? (uint64_t) simulated_overflow : 0;
++        kvflash_pool.dry_run_scores++;
++        kvflash_pool.dry_run_candidate_tokens += candidate_tokens;
++        kvflash_pool.simulated_eviction_checks++;
++        kvflash_pool.simulated_eviction_candidates += simulated_eviction_candidates;
++        kvflash_pool.misses++;
++
++        SRV_DBG("experimental KVFlash dry-run score: task=%d tokens=%zu candidate_tokens=%" PRIu64 " simulated_eviction_candidates=%" PRIu64 " policy=%s tau=%d active=false\n",
++                task.id, src.size(), candidate_tokens, simulated_eviction_candidates, params_base.kvflash_policy.c_str(), params_base.kvflash_tau);
++        return true;
++    }
++
++    void record_pflash_kvflash_hints(const std::vector<size_t> & keep) {
++        if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0) {
++            return;
++        }
++        const uint64_t hinted = (uint64_t) std::min<size_t>(keep.size(), (size_t) std::max(0, params_base.kvflash_tokens));
++        pflash_state.kvflash_hints++;
++        pflash_state.kvflash_hint_tokens += hinted;
++        kvflash_pool.entries++;
++        kvflash_pool.resident_tokens = (int32_t) std::min<uint64_t>((uint64_t) kvflash_pool.capacity_tokens, hinted);
++        SRV_DBG("experimental PFlash->KVFlash residency hints: keep_indices=%zu hinted_tokens=%" PRIu64 " active=false\n", keep.size(), hinted);
++    }
++
++    bool maybe_apply_pflash_prompt_compression(server_task & task) {
++        if (params_base.pflash_mode != "always") {
++            return false;
++        }
++        if (params_base.pflash_keep_ratio >= 1.0f) {
++            return false;
++        }
++        if (task.type != SERVER_TASK_TYPE_COMPLETION && task.type != SERVER_TASK_TYPE_INFILL) {
++            return false;
++        }
++        if (task.tokens.has_mtmd) {
++            SRV_WRN("PFlash compression skipped for task %d: multimodal prompts are not supported yet\n", task.id);
++            return false;
++        }
++
++        const llama_tokens & src = task.tokens.get_tokens();
++        const size_t n_src = src.size();
++        if (n_src < 4) {
++            return false;
++        }
++        if ((task.params.res_type == TASK_RESPONSE_TYPE_OAI_CHAT ||
++                    task.params.res_type == TASK_RESPONSE_TYPE_OAI_RESP ||
++                    task.params.res_type == TASK_RESPONSE_TYPE_ANTHROPIC) && n_src < 128) {
++            SRV_WRN("PFlash compression skipped for task %d: chat-formatted prompt is too short for edge-preserving compression (%zu tokens)\n",
++                    task.id, n_src);
++            return false;
++        }
++
++        const size_t n_keep = std::max<size_t>(2, (size_t) std::ceil((double) n_src * params_base.pflash_keep_ratio));
++        if (n_keep >= n_src) {
++            return false;
++        }
++
++        pflash_state.requests++;
++        const size_t n_edge = pflash_edge_keep(n_src, n_keep);
++        const std::vector<size_t> structural = pflash_structural_indices(src);
++        pflash_state.structural_tokens += structural.size();
++
++        std::vector<size_t> keep;
++        bool helper_ok = false;
++        if (params_base.pflash_score == "external-helper") {
++            helper_ok = maybe_run_pflash_drafter_helper(src, n_keep, n_edge, structural, keep);
++        } else if (params_base.pflash_score == "model") {
++            if (!pflash_state.model_loaded) {
++                SRV_WRN("PFlash model scorer requested but model is not loaded; falling back to uniform scoring: %s\n",
++                        params_base.pflash_model.empty() ? "<none>" : params_base.pflash_model.c_str());
++            }
++            keep = pflash_model_score_indices(src, n_keep, n_edge, structural);
++        }
++        if (keep.empty()) {
++            pflash_state.uniform_scores++;
++            keep = pflash_uniform_keep_indices(n_src, n_keep, n_edge, structural);
++        }
++        if (!validate_pflash_keep_indices(src, keep, n_keep, n_edge, structural, helper_ok ? "helper" : params_base.pflash_score.c_str())) {
++            SRV_WRN("PFlash compression skipped for task %d: unusable keep_indices for source length %zu and keep target %zu\n",
++                    task.id, n_src, n_keep);
++            return false;
++        }
++
++        llama_tokens dst = pflash_tokens_from_indices(src, keep);
++        task.tokens = server_tokens(dst, false);
++        pflash_state.compressed++;
++        pflash_state.original_tokens += n_src;
++        pflash_state.kept_tokens += dst.size();
++        record_pflash_kvflash_hints(keep);
++
++        SRV_WRN("experimental PFlash compressed task %d prompt tokens: %zu -> %zu, mode=%s, keep_ratio=%.3f, backend=%s, helper=%s, model=%s, structural=%zu\n",
++                task.id, n_src, dst.size(), params_base.pflash_mode.c_str(), params_base.pflash_keep_ratio,
++                params_base.pflash_score.c_str(), helper_ok ? "true" : "false",
++                pflash_state.model_loaded ? "loaded" : "none", structural.size());
++        return true;
++    }
++
+     void process_single_task(server_task && task) {
+         switch (task.type) {
+             case SERVER_TASK_TYPE_COMPLETION:
+@@ -2375,6 +2863,9 @@ private:
+                         }
+                     }
+ 
++                    maybe_score_kvflash_dry_run(task);
++                    maybe_apply_pflash_prompt_compression(task);
++
+                     const int id_task = task.id;
+ 
+                     server_slot * slot = get_available_slot(task);
+@@ -2750,6 +3241,8 @@ private:
+     };
+ #endif
+ 
++
++
+     void update_slots() {
+ #ifdef DEBUG_TIMINGS
+         static int64_t t_prev = 0;
+@@ -3989,6 +4482,8 @@ server_context_meta server_context::get_meta() const {
+         /* json_ui_settings       */ impl->json_ui_settings,
+         /* slot_n_ctx             */ impl->get_slot_n_ctx(),
+         /* pooling_type           */ llama_pooling_type(impl->ctx_tgt),
++        /* kvflash_status         */ impl->get_kvflash_status(),
++        /* pflash_status          */ impl->get_pflash_status(),
+ 
+         /* chat_params            */ impl->chat_params,
+         /* chat_template_caps     */ common_chat_templates_get_caps(impl->chat_params.tmpls.get()),
+@@ -4576,6 +5071,8 @@ void server_routes::init_routes() {
+             { "build_info",                  meta->build_info },
+             { "is_sleeping",                 queue_tasks.is_sleeping() },
+             { "cors_proxy_enabled",          params.ui_mcp_proxy },
++            { "kvflash",                     this->ctx_server.get_kvflash_status() },
++            { "pflash",                      this->ctx_server.get_pflash_status() },
+         };
+         if (params.use_jinja) {
+             if (!tmpl_tools.empty()) {
+diff --git a/tools/server/server-context.h b/tools/server/server-context.h
+index 952f825..6bb65cd 100644
+--- a/tools/server/server-context.h
++++ b/tools/server/server-context.h
+@@ -25,6 +25,8 @@ struct server_context_meta {
+     json json_ui_settings;
+     int slot_n_ctx;
+     enum llama_pooling_type pooling_type;
++    json kvflash_status;
++    json pflash_status;
+ 
+     // chat params
+     server_chat_params & chat_params;
+
+diff --git a/PORT_STATUS.md b/PORT_STATUS.md
+new file mode 100644
+index 0000000..09aac87
+--- /dev/null
++++ b/PORT_STATUS.md
+@@ -0,0 +1,326 @@
++# PFlash/KVFlash Port Status
++
++## Base
++
++- Fork path: `${LLAMA_CPP_DIR}`
++- Base upstream commit: `dbdaece23de9ac63f2e7ca9e6bfcdc4fc156a3fa`
++- Branch: `local-user/dflash-pflash-kvflash`
++
++## Checkpoint 001 - CLI/config scaffold
++
++Added experimental CLI/config fields for:
++
++- `--kvflash N|auto`
++- `--kvflash-policy lru|qk|drafter`
++- `--kvflash-tau N`
++- `--kvflash-drafter FNAME`
++- `--prefill-drafter FNAME`
++- `--pflash-drafter FNAME`
++- `--pflash-keep-ratio N`
++- `--pflash-mode off|always|auto`
++- `--pflash-drafter-gpu N`
++
++These parse and log at startup. Default behavior is unchanged.
++
++## Checkpoint 002 - first PFlash runtime hook
++
++Added a narrowly gated server task hook in `tools/server/server-context.cpp`:
++
++- Only runs when `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- Only applies to completion/infill tasks.
++- Skips multimodal prompts.
++- Keeps the first and last token and uniformly samples the middle tokens down to the requested keep ratio.
++- Logs `experimental PFlash compressed task ...` when it modifies a prompt.
++
++This is not the final Lucebox drafter-driven PFlash algorithm. It is a safe integration slice that proves the upstream server can route prompt-token compression through the task boundary without changing default behavior. The next step is replacing the uniform thinning placeholder with real drafter scoring/compression.
++
++## Checkpoint 003 - PFlash drafter-helper bridge
++
++Reworked the PFlash hook so `--pflash-drafter` is no longer only a logged path:
++
++- If `--pflash-drafter` points to an executable helper, the server writes the prompt token IDs to a temporary file and runs:
++  - `<helper> <token-file> <keep-ratio> <pflash-drafter-gpu>`
++- The helper is expected to print surviving token IDs to stdout, separated by whitespace, commas, or semicolons.
++- A successful helper result replaces the prompt tokens and logs `drafter=helper`.
++- If no executable helper is configured, or the helper fails, the hook falls back to checkpoint-002 uniform compression and logs `drafter=uniform-fallback`.
++- Invalid helper output is rejected if it is empty, shorter than 2 tokens, or not actually compressed.
++
++This is a bridge for connecting the Lucebox drafter scorer/IPC daemon without pulling the whole custom backend into upstream in one patch. A true in-process GGUF drafter loader is still pending.
++
++## Checkpoint 004 - PFlash helper contract hardening
++
++Tightened the checkpoint-003 helper bridge so external drafter output cannot silently mutate prompts into an unsafe shape:
++
++- Temporary token files are now created with `mkstemp` under the system temp directory instead of a predictable `this`-pointer filename.
++- Helper output must preserve the first and last prompt token.
++- Helper output must be an ordered subsequence of the original prompt tokens.
++- Helper output must be no longer than the computed keep target from `--pflash-keep-ratio`.
++- The built-in uniform fallback now goes through the same validation path before prompt mutation.
++
++This checkpoint keeps the helper bridge external and experimental, but makes the protocol strict enough for a real Lucebox scorer/helper to plug in without accepting reordered, invented, or under-compressed token streams.
++
++## Checkpoint 005 - KVFlash visibility scaffold
++
++Started the KVFlash runtime side without changing KV-cache behavior:
++
++- Server initialization now logs whether experimental KVFlash is disabled or configured-but-not-active.
++- The `/props` response now includes a `kvflash` object with configured tokens, policy, tau, drafter, and `active=false`.
++- `--kvflash` remains a visibility/configuration scaffold only; no KV allocation, eviction, paging, attention-mask, or recall behavior is changed.
++
++This checkpoint makes KVFlash configuration observable before any risky KV-cache mutation work.
++
++## Checkpoint 006 - KVFlash resident pool skeleton
++
++Added an inert resident-pool state object for future KVFlash work:
++
++- Tracks configured capacity, resident token count, entries, hits, misses, and evictions.
++- Initializes only when `--kvflash` is configured.
++- Exposes the counters under `/props` as `kvflash.resident_pool`.
++- Logs the zeroed resident-pool counters at startup when KVFlash is configured.
++- Keeps `active=false` and does not allocate, evict, page, recall, or mutate any llama KV cache state.
++
++This checkpoint creates observable state for later dry-run scoring and eviction simulation without changing model execution.
++
++## Checkpoint 007 - KVFlash dry-run scoring hooks
++
++Added a dry-run scoring hook at the server task boundary:
++
++- Runs only when `--kvflash` is configured and only for completion/infill prompts.
++- Observes prompt length, policy, tau, and candidate-token budget before PFlash may alter the prompt.
++- Increments inert `dry_run_scores`, `dry_run_candidate_tokens`, and miss counters for visibility.
++- Exposes those counters in `/props` under `kvflash.resident_pool`.
++- Logs dry-run scoring at debug level with `active=false`.
++- Does not change task tokens, slot selection, KV cache state, attention masks, or generation behavior.
++
++This checkpoint creates the first policy-observation path needed for later eviction simulation while keeping KVFlash non-active.
++
++## Checkpoint 008 - KVFlash eviction simulation
++
++Extended the dry-run KVFlash path with eviction simulation counters:
++
++- Computes whether a prompt candidate would overflow the configured resident token budget.
++- Accumulates `simulated_eviction_checks` and `simulated_eviction_candidates` for `/props` visibility.
++- Logs simulated eviction candidates at debug level while keeping `active=false`.
++- Leaves real `entries`, `resident_tokens`, and `evictions` unchanged.
++- Does not call llama KV cache remove, clear, update, paging, or attention-mask paths.
++
++This checkpoint previews eviction pressure without performing eviction or changing generation behavior.
++
++## Checkpoint 009 - reproducible PFlash helper target
++
++Added a checked-in reference helper for the existing external PFlash helper protocol:
++
++- `tools/server/pflash-uniform-helper.py`
++- Accepts `<token-file> <keep-ratio> <pflash-drafter-gpu>`.
++- Reads one token id per line from the token file.
++- Emits a first/last-preserving ordered subsequence using the same deterministic uniform strategy as the built-in fallback.
++- Validates argument count, keep-ratio range, token-file existence, and token parsing.
++- Leaves in-process GGUF drafter loading/scoring still pending; this is a reproducible IPC/helper target for integration and testing.
++
++This checkpoint gives `--pflash-drafter` a repository-local executable target that exercises the hardened helper bridge without requiring Lucebox drafter model loading yet.
++
++## Checkpoint 010 - live model runtime validation attempt
++
++Attempted live runtime validation with the forked `build-hip-gfx1151/bin/llama-server` on port 18080 using `--no-mmap`, configured KVFlash, PFlash always mode, and the checked-in PFlash helper.
++
++Results:
++
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat.gguf` failed to load because tokenizer metadata was missing: `key not found in model: tokenizer.ggml.model`.
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat-tokenizer.gguf` failed to load because it was not a complete standalone model: `missing tensor 'fc.weight'`.
++- `qwen3.6-27b-dflash-zlab-q8_0.gguf` failed context initialization because standalone DFlash requires a paired context: `dflash requires ctx_other to be set`.
++- An existing healthy server on port 8080 was checked, but it is a separate CUDA build from `${HOME}/experiments/llamacpp-master-20260610` and does not expose this fork's KVFlash `/props` field, so it cannot validate this workspace.
++
++Live validation is therefore blocked until a standalone compatible GGUF is available for this fork, or the correct paired DFlash launch command/model set is provided. No running validation server was left behind.
++
++## Checkpoint 011 - broader test validation
++
++Built the missing CTest executables and ran broader validation:
++
++- Initial `ctest --test-dir build-hip-gfx1151 --output-on-failure` failed because test executables had not been built.
++- Built the missing test targets, then reran full CTest.
++- Full CTest exposed and fixed one real local regression: argument aliases now list `--pflash-drafter` before the longer `--prefill-drafter`, as required by `test-arg-parser`.
++- `test-arg-parser` passed after the fix.
++- Full CTest then had one remaining unrelated external-data failure: `test-tokenizers-ggml-vocabs` downloaded several invalid Git LFS pointer files and failed with `invalid magic characters: 'vers', expected 'GGUF'`.
++- The suite excluding that external-data test passed: `ctest --test-dir build-hip-gfx1151 -E '^test-tokenizers-ggml-vocabs$' --output-on-failure` reported `100% tests passed, 0 tests failed out of 53`.
++
++This is broader build/test validation for the fork. It is not live model runtime validation because Checkpoint 010 is blocked by unavailable compatible live model inputs.
++
++## Checkpoint 012 - paired DFlash live smoke validation
++
++Validated this fork with the known-good paired Qwen3.6 DFlash model set that previously benchmarked successfully on the upstream DFlash server:
++
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/models/hf-spiritbuun-qwen36-dflash/dflash-draft-3.6-q8_0.official-dflash-compat.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and the checked-in PFlash helper.
++- The legacy reference flag `-cd 4096` is not accepted by this fork's current CLI, so the successful smoke omitted it.
++- `/health` returned `{"status":"ok"}` on port 18080.
++- `/props` showed this fork's `kvflash` object with `configured=true`, `active=false`, `tokens=1024`, `policy=qk`, and initialized zeroed resident-pool counters.
++- Live `/completion` requests generated text and reported speculative DFlash timing fields, including `draft_n` and `draft_n_accepted`.
++- Server logs showed `common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'` and PFlash helper compression such as `experimental PFlash compressed task ... drafter=helper`.
++- No validation server was left running after the smoke.
++
++This checkpoint resolves the previous live-validation blocker for this fork at smoke-test scope. It is not a full benchmark pass and does not activate real KVFlash mutation; KVFlash remains configured but inactive.
++
++## Checkpoint 013 - paired DFlash live benchmark validation
++
++Ran the full six-prompt benchsplit task set against this fork with the paired Qwen3.6 DFlash model set:
++
++- Run directory: `checkpoint-013-live-bench-20260629T152302Z`.
++- Summary: `checkpoint-013-live-bench-20260629T152302Z/summary.jsonl`.
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/models/hf-spiritbuun-qwen36-dflash/dflash-draft-3.6-q8_0.official-dflash-compat.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and PFlash disabled.
++- KVFlash remained configured but inactive: `configured=true`, `active=false`, `tokens=1024`, `policy=qk`, `tau=64`.
++- All six benchmark quality checks passed:
++  - `speed-short-list`: 43 completion tokens, 17.8 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=35`, qscore 0.9.
++  - `speed-code`: 93 completion tokens, 38.4 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=85`, qscore 1.0.
++  - `speed-structured-json`: 385 completion tokens, 35.7 tok/s wall-clock, `draft_n=690`, `draft_n_accepted=340`, qscore 1.0.
++  - `reasoning-trains`: 1025 completion tokens, 25.1 tok/s wall-clock, `draft_n=2670`, `draft_n_accepted=848`, qscore 1.0.
++  - `agent-tool-decision`: 46 completion tokens, 18.2 tok/s wall-clock, `draft_n=135`, `draft_n_accepted=38`, qscore 1.0.
++  - `long-gen-essay`: 1066 completion tokens, 12.3 tok/s wall-clock, `draft_n=5745`, `draft_n_accepted=684`, qscore 1.0.
++- Logs showed DFlash draft acceptance lines and `common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'`.
++- No validation server was left running after the benchmark.
++
++An earlier same-script attempt with `--pflash-mode always --pflash-keep-ratio 0.5` is preserved at `checkpoint-013-live-bench-20260629T152209Z`. It returned HTTP 200 for all six tasks but generated only one empty completion token per task. Logs show the uniform helper compressed chat-template token sequences, e.g. `experimental PFlash compressed task ... drafter=helper`. That run is a negative finding for the placeholder PFlash hook on chat-completion workloads, not a benchmark pass.
++
++This checkpoint validates the fork's paired DFlash path under a full six-task live benchmark. It does not validate real PFlash scoring or real KVFlash mutation; PFlash was disabled for the passing benchmark and KVFlash remained configured-but-inactive.
++
++## Checkpoint 014 - PFlash chat-template safety guard
++
++Added a narrow safety guard to the placeholder/helper PFlash hook:
++
++- PFlash prompt compression still requires `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- It now skips chat-formatted request paths before mutating prompt tokens:
++  - `TASK_RESPONSE_TYPE_OAI_CHAT`
++  - `TASK_RESPONSE_TYPE_OAI_RESP`
++  - `TASK_RESPONSE_TYPE_ANTHROPIC`
++- The skip logs: `PFlash compression skipped for task ... chat-formatted prompts are not supported yet`.
++- Native `/completion`, OAI `/v1/completions`, and infill remain eligible for the existing experimental helper/uniform compression path.
++
++Reason: Checkpoint 013 showed that uniformly compressing already-templated chat prompts can remove structurally important chat-template/control tokens and cause empty one-token completions. This guard prevents that silent benchmark-quality failure while preserving the experimental raw completion hook.
++
++Live verification:
++
++- Run directory: `checkpoint-014-pflash-chat-guard-20260629T152815Z`.
++- Launched paired DFlash with `--pflash-mode always --pflash-keep-ratio 0.5` and the checked-in helper.
++- Sent a `/v1/chat/completions` request.
++- Response returned HTTP 200 with content: `Red Blue Green Yellow Purple`.
++- Logs contained the new chat-formatted skip message.
++- Logs did not contain `experimental PFlash compressed task` for the chat request.
++- Response timings included DFlash activity with `draft_n > 0`.
++- No validation server was left running after the check.
++
++## Checkpoint 015 - Z Lab DFlash benchmark and matrix comparison
++
++Reran the six-prompt benchsplit validation against this fork using the self-made Z Lab DFlash drafter instead of the earlier SpiritBuun draft GGUF:
++
++- Run directory: `checkpoint-015-zlab-dflash-bench-20260629T154102Z`.
++- Summary: `checkpoint-015-zlab-dflash-bench-20260629T154102Z/summary.jsonl`.
++- Comparison: `checkpoint-015-zlab-dflash-bench-20260629T154102Z/comparison.json`.
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${MODEL_DIR}/z-lab-Qwen3.6-27B-DFlash/qwen3.6-27b-dflash-zlab-q8_0.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and PFlash disabled.
++- KVFlash remained configured but inactive: `--kvflash 1024 --kvflash-policy qk --kvflash-tau 64`.
++- All six benchmark quality checks passed: 2584 completion tokens in 134.231s, weighted 19.25 tok/s.
++
++Comparison against referenced matrix/baseline files:
++
++| Anchor | Pass | Tokens | Wall s | Weighted tok/s | Delta vs CP015 |
++| --- | ---: | ---: | ---: | ---: | ---: |
++| CP015 current fork + Z Lab DFlash | 6/6 | 2584 | 134.231 | 19.25 | baseline |
++| upstream_dflash_zlab_q8 reference | 6/6 | 2584 | 135.643 | 19.05 | +1.05% |
++| upstream_no_spec reference | 6/6 | 2568 | 220.250 | 11.659 | +65.11% |
++| upstream_mtp reference | 6/6 | 2710 | 179.963 | 15.059 | +27.83% |
++| matrix_lucebox_fast_recipe_prefix32 | 6/6 | 2521 | 152.672 | 16.513 | +16.57% |
++| matrix_lucebox_fast_recipe_prefix0 | 6/6 | 2521 | 153.002 | 16.477 | +16.83% |
++| matrix_lucebox_swa_ddtree | 6/6 | 2609 | 158.160 | 16.496 | +16.69% |
++| matrix_lucebox_dflash_ddtree_on | 6/6 | 2797 | 177.802 | 15.731 | +22.37% |
++| matrix_lucebox_dflash_ddtree_off | 6/6 | 2617 | 162.078 | 16.147 | +19.22% |
++| matrix_lucebox_no_dflash_no_ddtree | 6/6 | 2625 | 232.948 | 11.269 | +70.82% |
++
++Source comparison files:
++
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-matrix-20260629T010545Z/summary.jsonl`
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-rerun-20260629T015345Z/summary.jsonl`
++- `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-dflash-zlab-q8-20260629T025201Z/summary.jsonl`
++
++This supersedes Checkpoint 013's SpiritBuun-drafter benchmark as the preferred DFlash validation baseline for this fork.
++
++## Checkpoint 016 - PFlash edge-preserving prompt compression
++
++Advanced the experimental PFlash hook beyond first/last-token preservation:
++
++- Added a shared edge-preservation rule for server validation and the reference helper.
++- PFlash compressed prompts must now preserve a prefix and suffix of up to 64 tokens, bounded by source length and keep target.
++- The built-in uniform fallback now keeps those prompt edges and only thins the middle.
++- The checked-in helper `tools/server/pflash-uniform-helper.py` now uses the same edge-preserving thinning strategy.
++- Helper output validation rejects compressed prompts that do not preserve the required prompt edges.
++- Chat-formatted prompts shorter than 128 tokens are skipped rather than compressed, because there is not enough room to preserve template/control-token edges safely.
++- Long chat-formatted prompts are now eligible for the edge-preserving experimental path.
++
++Live verification:
++
++- Run directory: `checkpoint-016-pflash-edge-guard-20260629T154539Z`.
++- Summary: `checkpoint-016-pflash-edge-guard-20260629T154539Z/summary.json`.
++- Launched paired DFlash with the Z Lab drafter, `--pflash-mode always --pflash-keep-ratio 0.5`, and `--pflash-drafter tools/server/pflash-uniform-helper.py`.
++- Short `/v1/chat/completions` request returned HTTP 200 with `red blue green` and logged the short-chat skip.
++- Long `/v1/chat/completions` request returned HTTP 200 with `The text consists of repetitive sequences of Greek letters. DONE.`
++- Logs showed `experimental PFlash compressed task ... drafter=helper` for the long chat request.
++- Logs did not show any edge-preservation rejection.
++- No validation server was left running after the check.
++
++This makes PFlash usable for bounded edge-preserved prompt compression experiments. It is still not the final Lucebox PFlash algorithm: real in-process PFlash drafter GGUF loading/scoring remains pending.
++
++## Checkpoint 017 - PFlash keep-index scorer contract
++
++Replaced the external helper's token-rewrite protocol with a keep-index scorer contract:
++
++- Helper input is now JSON with `tokens`, `keep_ratio`, `preserve_prefix`, `preserve_suffix`, and `structural_indices`.
++- Helper output is now JSON with `keep_indices` and optional `scores`.
++- The server maps keep indices back to original token IDs itself.
++- Server-side validation requires sorted unique in-range indices, preserved prompt edges, and preserved structural-token indices.
++- `tools/server/pflash-uniform-helper.py` was updated as the reference implementation for this protocol.
++
++This is the clean abstraction needed for Lucebox-style scoring: scorers choose original prompt positions; the server owns prompt mutation safety.
++
++## Checkpoint 018 - PFlash scorer backend skeleton
++
++Added an explicit scorer backend selection path:
++
++- New CLI/config field: `--pflash-model FNAME`.
++- New CLI/config field: `--pflash-score uniform|external-helper|model`.
++- Startup logging now reports PFlash mode, keep ratio, backend, helper path, model path, and whether the model path is present.
++- `external-helper` uses the JSON keep-index helper contract.
++- `model` is an in-process scorer skeleton that validates/owns the configured model path and currently uses the same deterministic keep-index heuristic as a placeholder scorer.
++- `uniform` remains available as the built-in no-helper fallback.
++
++This proves the server owns a PFlash scorer mode and model path separately from the external helper. The actual GGUF forward/scoring algorithm is still a placeholder in this checkpoint.
++
++## Checkpoint 019 - PFlash structural-token preservation
++
++Added structural preservation on top of edge preservation:
++
++- BOS/EOS/EOG/control tokens are marked structural using the llama vocab APIs.
++- Token pieces containing newline boundaries, chat sentinel fragments, role/tool words, or template-ish delimiters are marked structural.
++- Structural indices are included in helper requests.
++- Server validation rejects any scorer/helper output that drops a structural index.
++- `/props.pflash.structural_tokens` accumulates observed structural-token count.
++
++This keeps PFlash from compressing through chat/template/control structure even when the prompt is long enough to compress.
++
++## Checkpoint 020 - PFlash to KVFlash residency hints
++
++Connected the PFlash selection path to the existing inert KVFlash resident-pool scaffold:
++
++- When PFlash compresses a prompt and KVFlash is configured, the selected keep indices are recorded as residency hints.
++- `/props.pflash.kvflash_hints` and `kvflash_hint_tokens` report hint activity.
++- `/props.kvflash.resident_pool.entries` and `resident_tokens` are updated as dry-run/hint visibility counters.
++- KVFlash still reports `active=false`; this does not allocate/pin/purge llama KV cache, change attention masks, page KV blocks, or alter recall behavior yet.
++
++This is the bridge from PFlash scoring to KVFlash planning without mutating llama.cpp KV-cache internals prematurely.
++
++## Still pending
++
++- Replace the CP018 placeholder model scorer with real GGUF forward/scoring, ideally matching Lucebox PFlash scoring semantics.
++- KVFlash real resident pool allocation, paging, attention mask integration, and recall.
++- Full benchmark matrix for DFlash only, DFlash + uniform PFlash, DFlash + scored PFlash, and DFlash + scored PFlash + KVFlash hints.
+
+diff --git a/tools/server/pflash-uniform-helper.py b/tools/server/pflash-uniform-helper.py
+new file mode 100755
+index 0000000..605f1f8
+--- /dev/null
++++ b/tools/server/pflash-uniform-helper.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""Reference PFlash helper for the experimental keep-index protocol.
++
++Usage:
++    pflash-uniform-helper.py <request-json> <pflash-drafter-gpu>
++
++The request JSON contains tokens, keep_ratio, preserve_prefix, preserve_suffix,
++and optional structural_indices. The helper prints JSON with keep_indices and
++optional scores. The server validates indices and maps them back to token ids.
++"""
++
++from __future__ import annotations
++
++import json
++import math
++import pathlib
++import sys
++
++
++def fail(message: str) -> int:
++    print(f"pflash-uniform-helper: {message}", file=sys.stderr)
++    return 2
++
++
++def edge_indices(n_src: int, n_keep: int, prefix: int, suffix: int) -> set[int]:
++    keep: set[int] = set()
++    for i in range(min(prefix, n_src)):
++        keep.add(i)
++    start = max(0, n_src - suffix)
++    for i in range(start, n_src):
++        keep.add(i)
++    return keep
++
++
++def uniform_keep_indices(tokens: list[int], keep_ratio: float, prefix: int, suffix: int, structural: list[int]) -> list[int]:
++    n_src = len(tokens)
++    if n_src < 4:
++        return list(range(n_src))
++
++    n_keep = max(2, math.ceil(n_src * keep_ratio))
++    if n_keep >= n_src:
++        return list(range(n_src))
++
++    keep = edge_indices(n_src, n_keep, prefix, suffix)
++    for idx in structural:
++        if 0 <= idx < n_src:
++            keep.add(idx)
++
++    remaining = max(0, n_keep - len(keep))
++    middle_begin = min(prefix, n_src)
++    middle_end = max(middle_begin, n_src - suffix)
++    n_middle_src = middle_end - middle_begin
++    if remaining > 0 and n_middle_src > 0:
++        for i in range(remaining):
++            idx = middle_begin + ((i + 1) * n_middle_src) // (remaining + 1)
++            keep.add(min(n_src - 1, idx))
++
++    # If structural preservation overshot the budget, keep it anyway. The server
++    # decides whether to accept oversize structural output.
++    return sorted(keep)
++
++
++def main(argv: list[str]) -> int:
++    if len(argv) != 3:
++        return fail("expected: <request-json> <pflash-drafter-gpu>")
++
++    req_path = pathlib.Path(argv[1])
++    if not req_path.is_file():
++        return fail(f"request file not found: {req_path}")
++
++    try:
++        req = json.loads(req_path.read_text())
++        tokens = [int(x) for x in req["tokens"]]
++        keep_ratio = float(req["keep_ratio"])
++        prefix = int(req.get("preserve_prefix", 64))
++        suffix = int(req.get("preserve_suffix", 64))
++        structural = [int(x) for x in req.get("structural_indices", [])]
++    except Exception as exc:
++        return fail(str(exc))
++
++    if not tokens:
++        return fail("token list is empty")
++    if not (0.0 < keep_ratio < 1.0):
++        return fail("keep-ratio must be greater than 0 and less than 1")
++    if prefix < 0 or suffix < 0:
++        return fail("preserve_prefix/preserve_suffix must be non-negative")
++
++    keep_indices = uniform_keep_indices(tokens, keep_ratio, prefix, suffix, structural)
++    scores = [1.0 if i in set(keep_indices) else 0.0 for i in range(len(tokens))]
++    print(json.dumps({"keep_indices": keep_indices, "scores": scores}, separators=(",", ":")))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv))
+
+diff --git a/tools/server/bench_cp015_zlab_compare.py b/tools/server/bench_cp015_zlab_compare.py
+new file mode 100644
+index 0000000..3ebeaee
+--- /dev/null
++++ b/tools/server/bench_cp015_zlab_compare.py
+@@ -0,0 +1,330 @@
++#!/usr/bin/env python3
++import json
++import os
++import re
++import signal
++import subprocess
++import time
++import urllib.request
++from pathlib import Path
++from datetime import datetime, timezone
++
++REPO = Path('${LLAMA_CPP_DIR}')
++RUN = REPO / ('checkpoint-015-zlab-dflash-bench-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
++LOGDIR = RUN / 'logs'
++OUTDIR = RUN / 'outputs'
++LOGDIR.mkdir(parents=True, exist_ok=True)
++OUTDIR.mkdir(parents=True, exist_ok=True)
++SUMMARY = RUN / 'summary.jsonl'
++COMPARE = RUN / 'comparison.json'
++PORT = int(os.environ.get('BENCH_PORT', '18120'))
++HOST = '127.0.0.1'
++URL_CHAT = f'http://{HOST}:{PORT}/v1/chat/completions'
++URL_HEALTH = f'http://{HOST}:{PORT}/health'
++CTX = int(os.environ.get('BENCH_CTX', '8192'))
++REQ_TIMEOUT = int(os.environ.get('BENCH_REQ_TIMEOUT', '1800'))
++
++BIN = str(REPO / 'build-hip-gfx1151/bin/llama-server')
++TARGET = '${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf'
++DRAFT = '${MODEL_DIR}/z-lab-Qwen3.6-27B-DFlash/qwen3.6-27b-dflash-zlab-q8_0.gguf'
++MATRIX = Path('${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-matrix-20260629T010545Z/summary.jsonl')
++UPSTREAM_ZLAB = Path('${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-dflash-zlab-q8-20260629T025201Z/summary.jsonl')
++UPSTREAM_RERUN = Path('${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/benchsplit-six-upstream-rerun-20260629T015345Z/summary.jsonl')
++
++
++def check_list(content):
++    langs = ['python','javascript','java','c++','c#','typescript','swift','go','ruby','php','kotlin','rust','html']
++    found = sum(1 for l in langs if l in content.lower())
++    return (found >= 5, min(1.0, found/10), f'{found}/10 known langs found')
++
++
++def check_code(content):
++    has_def = 'def ' in content and 'fizz' in content.lower()
++    has_15 = '15' in content or ('3' in content and '5' in content and '%' in content)
++    has_strs = 'fizzbuzz' in content.lower()
++    score = (int(has_def) + int(has_15) + int(has_strs)) / 3
++    return (score >= 0.66, score, f'def={has_def} mod15={has_15} fizzbuzz_str={has_strs}')
++
++
++def check_json(content):
++    c = re.sub(r'^```json?\s*|\s*```$', '', content.strip(), flags=re.MULTILINE)
++    try:
++        obj = json.loads(c)
++        if not isinstance(obj, list):
++            return (False, 0.2, 'not a list')
++        valid = sum(1 for e in obj if isinstance(e, dict) and 'name' in e and 'year' in e)
++        return (valid >= 8, min(1.0, valid/10), f'{valid}/10 valid entries, total={len(obj)}')
++    except Exception as e:
++        return (False, 0.0, f'JSON parse fail: {str(e)[:50]}')
++
++
++def check_reasoning(content):
++    bits = ['60','40','300','mph','mile']
++    found = sum(1 for b in bits if b in content.lower())
++    has_time = bool(re.search(r'\b1[0-9]:\d\d|\b1[0-9]\.\d+\s*(am|pm|hour)', content.lower()))
++    has_pos = bool(re.search(r'\b\d{2,3}\s*mile', content.lower()))
++    score = (found/5)*0.7 + 0.15*has_time + 0.15*has_pos
++    return (score >= 0.5, score, f'hit {found}/5 keywords, has_time={has_time} has_pos={has_pos}')
++
++
++def check_tool(content):
++    c = re.sub(r'^```json?\s*|\s*```$', '', content.strip(), flags=re.MULTILINE)
++    try:
++        obj = json.loads(c)
++        has_tool = 'tool' in obj and obj['tool'] == 'get_weather'
++        has_args = 'args' in obj and 'Tokyo' in str(obj['args'])
++        has_reason = 'reason' in obj
++        score = (int(has_tool) + int(has_args) + int(has_reason)) / 3
++        return (score >= 0.66, score, f"tool={obj.get('tool')} args_ok={has_args} reason={has_reason}")
++    except Exception as e:
++        return (False, 0.0, f'JSON parse fail: {str(e)[:50]}')
++
++
++def check_essay(content):
++    words = len(content.split())
++    keywords = ['draft','speculat','ngram','n-gram','token','accept','reject','verif']
++    hits = sum(1 for k in keywords if k in content.lower())
++    score = min(1.0, words/600)*0.5 + min(1.0, hits/5)*0.5
++    return (score >= 0.5, score, f'{words} words, {hits}/8 keywords')
++
++
++TASKS = [
++    ('list','speed-short-list','List the top 10 programming languages by popularity. Just the list, no commentary.',400,check_list),
++    ('code','speed-code','Write a Python function called fizzbuzz that prints 1 to 100 with FizzBuzz logic.',400,check_code),
++    ('json','speed-structured-json','Return a JSON array of 10 popular programming languages with fields: name, year, paradigm. Output ONLY valid JSON, nothing else.',600,check_json),
++    ('reason','reasoning-trains','Train A leaves station X at 9:00 AM going east at 60 mph. Train B leaves station Y, 300 miles east of X, at 10:00 AM going west at 40 mph. When and where do they meet? Show your work step by step.',1200,check_reasoning),
++    ('tool','agent-tool-decision','You have tools: get_weather(city), search_web(query), send_email(to,body). User asks: \'What\'s the weather in Tokyo?\' Reply with valid JSON: {"tool": ..., "args": ..., "reason": ...}. Output ONLY the JSON.',200,check_tool),
++    ('essay','long-gen-essay','Write a 600-word technical explainer of speculative decoding for a developer audience. Cover ngram, draft-model, and MTP variants. Be concrete.',1500,check_essay),
++]
++
++
++def load_rows(path):
++    rows = []
++    if path.exists():
++        for line in path.read_text(errors='replace').splitlines():
++            line = line.strip()
++            if not line:
++                continue
++            try:
++                row = json.loads(line)
++            except Exception:
++                continue
++            if row.get('passed') is not None:
++                rows.append(row)
++    return rows
++
++
++def aggregate(rows, config=None):
++    if config is not None:
++        rows = [r for r in rows if r.get('config') == config]
++    passed = sum(1 for r in rows if r.get('passed'))
++    tokens = sum(int(r.get('tokens') or r.get('usage', {}).get('completion_tokens') or 0) for r in rows)
++    wall = sum(float(r.get('wall_s') or 0) for r in rows)
++    drafted = sum(int(r.get('metrics', {}).get('drafted') or 0) for r in rows)
++    accepted = sum(int(r.get('metrics', {}).get('accepted') or 0) for r in rows)
++    return {
++        'rows': len(rows),
++        'passed': passed,
++        'tokens': tokens,
++        'wall_s': round(wall, 3),
++        'weighted_tps': round(tokens / wall, 3) if wall else 0,
++        'accepted': accepted,
++        'drafted': drafted,
++        'acceptance': round(accepted / drafted, 4) if drafted else 0,
++    }
++
++
++def build_comparison(current_rows):
++    matrix_rows = load_rows(MATRIX)
++    up_zlab_rows = load_rows(UPSTREAM_ZLAB)
++    up_rows = load_rows(UPSTREAM_RERUN)
++    anchors = {
++        'cp015_current_fork_zlab_dflash_kvflash_cfg': aggregate(current_rows),
++        'upstream_dflash_zlab_q8_reference': aggregate(up_zlab_rows, 'upstream_dflash_zlab_q8'),
++        'upstream_no_spec_reference': aggregate(up_rows, 'upstream_no_spec'),
++        'upstream_mtp_reference': aggregate(up_rows, 'upstream_mtp'),
++        'matrix_lucebox_fast_recipe_prefix32': aggregate(matrix_rows, 'lucebox_fast_recipe_prefix32'),
++        'matrix_lucebox_fast_recipe_prefix0': aggregate(matrix_rows, 'lucebox_fast_recipe_prefix0'),
++        'matrix_lucebox_swa_ddtree': aggregate(matrix_rows, 'lucebox_swa_ddtree'),
++        'matrix_lucebox_dflash_ddtree_on': aggregate(matrix_rows, 'lucebox_dflash_ddtree_on'),
++        'matrix_lucebox_dflash_ddtree_off': aggregate(matrix_rows, 'lucebox_dflash_ddtree_off'),
++        'matrix_lucebox_no_dflash_no_ddtree': aggregate(matrix_rows, 'lucebox_no_dflash_no_ddtree'),
++    }
++    cur = anchors['cp015_current_fork_zlab_dflash_kvflash_cfg']['weighted_tps']
++    deltas = {}
++    for k, v in anchors.items():
++        base = v['weighted_tps']
++        if k != 'cp015_current_fork_zlab_dflash_kvflash_cfg' and base:
++            deltas[k] = round((cur / base - 1) * 100, 2)
++    doc = {
++        'run_dir': str(RUN),
++        'summary': str(SUMMARY),
++        'target': TARGET,
++        'draft': DRAFT,
++        'ctx': CTX,
++        'anchors': anchors,
++        'deltas_pct_current_vs_anchor': deltas,
++        'source_files': [str(MATRIX), str(UPSTREAM_RERUN), str(UPSTREAM_ZLAB)],
++    }
++    COMPARE.write_text(json.dumps(doc, indent=2) + '\n')
++    return doc
++
++
++def port_listening():
++    return subprocess.run(['bash','-lc',f"ss -ltn | grep -q ':{PORT} '"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
++
++
++def wait_ready(timeout=900):
++    start = time.time()
++    last = ''
++    while time.time() - start < timeout:
++        try:
++            with urllib.request.urlopen(URL_HEALTH, timeout=2) as r:
++                txt = r.read().decode('utf-8', 'replace')
++                if r.status == 200:
++                    return True, txt
++                last = txt
++        except Exception as e:
++            last = repr(e)
++        time.sleep(2)
++    return False, last
++
++
++def post(obj, timeout):
++    data = json.dumps(obj).encode()
++    req = urllib.request.Request(URL_CHAT, data=data, headers={'Content-Type': 'application/json'})
++    with urllib.request.urlopen(req, timeout=timeout) as r:
++        return r.status, r.read().decode('utf-8', 'replace')
++
++
++def extract(raw):
++    try:
++        j = json.loads(raw)
++        msg = j.get('choices', [{}])[0].get('message', {})
++        return (msg.get('content') or msg.get('reasoning_content') or '', j)
++    except Exception:
++        return raw, None
++
++
++def parse_metrics(log_path, before):
++    data = log_path.read_text(errors='replace')[before:] if log_path.exists() else ''
++    metrics = {}
++    m = list(re.finditer(r'\[spec-decode\].*?tokens=(\d+).*?time=([0-9.]+) s speed=([0-9.]+) tok/s.*?accepted=([0-9]+)/([0-9]+)', data))
++    if m:
++        x = m[-1]
++        metrics.update({'spec_tokens': int(x.group(1)), 'spec_time_s': float(x.group(2)), 'eval_tps': float(x.group(3)), 'accepted': int(x.group(4)), 'drafted': int(x.group(5))})
++    for k, p in {'prompt_ms': r'prompt eval time\s*=\s*([0-9.]+) ms', 'eval_ms': r'eval time\s*=\s*([0-9.]+) ms', 'total_ms': r'total time\s*=\s*([0-9.]+) ms'}.items():
++        ms = list(re.finditer(p, data, re.S))
++        if ms:
++            try:
++                metrics[k] = float(ms[-1].group(1))
++            except Exception:
++                pass
++    return metrics
++
++
++def stop_proc(proc):
++    try:
++        os.killpg(proc.pid, signal.SIGTERM)
++    except Exception:
++        proc.terminate()
++    try:
++        proc.wait(timeout=30)
++    except subprocess.TimeoutExpired:
++        try:
++            os.killpg(proc.pid, signal.SIGKILL)
++        except Exception:
++            proc.kill()
++        proc.wait(timeout=30)
++
++
++cmd = [
++    BIN, '-m', TARGET, '-md', DRAFT,
++    '--host', HOST, '--port', str(PORT),
++    '--ctx-size', str(CTX), '--predict', '1500',
++    '--no-mmap', '--jinja',
++    '--cache-type-k', 'q8_0', '--cache-type-v', 'q8_0',
++    '--spec-type', 'draft-dflash', '--spec-draft-n-max', '15',
++    '--alias', 'bench',
++    '--kvflash', '1024', '--kvflash-policy', 'qk', '--kvflash-tau', '64',
++]
++
++env = os.environ.copy()
++env['LD_LIBRARY_PATH'] = str(REPO / 'build-hip-gfx1151/bin') + ':/opt/rocm/lib:' + env.get('LD_LIBRARY_PATH', '')
++
++print(f'RUN_DIR={RUN}', flush=True)
++print(f'SUMMARY={SUMMARY}', flush=True)
++print('TARGET=' + TARGET, flush=True)
++print('DRAFT=' + DRAFT, flush=True)
++print('CMD ' + ' '.join(cmd), flush=True)
++
++if port_listening():
++    raise SystemExit(f'port {PORT} already listening')
++
++log_path = LOGDIR / 'cp015_current_fork_zlab_dflash_kvflash_cfg.server.log'
++logf = open(log_path, 'wb')
++proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env, preexec_fn=os.setsid)
++rows = []
++try:
++    ok, health = wait_ready()
++    print(f'READY ok={ok} health={health[:200]!r}', flush=True)
++    if not ok:
++        SUMMARY.open('a').write(json.dumps({'config': 'cp015_current_fork_zlab_dflash_kvflash_cfg', 'error': 'server_not_ready', 'health': health, 'log': str(log_path)}) + '\n')
++        raise SystemExit(2)
++    for cat, task, prompt, max_tok, qfn in TASKS:
++        before = log_path.stat().st_size if log_path.exists() else 0
++        t0 = time.time()
++        status = None
++        raw = ''
++        error = None
++        req = {'model': 'bench', 'messages': [{'role': 'user', 'content': prompt}], 'max_tokens': max_tok, 'temperature': 0.0, 'chat_template_kwargs': {'enable_thinking': False}}
++        try:
++            status, raw = post(req, REQ_TIMEOUT)
++        except Exception as e:
++            error = repr(e)
++        wall = time.time() - t0
++        text, parsed = extract(raw)
++        passed = False
++        qscore = 0.0
++        qnote = 'no text'
++        if text:
++            passed, qscore, qnote = qfn(text)
++        safe = f'cp015_current_fork_zlab_dflash_kvflash_cfg_{task}'
++        (OUTDIR / f'{safe}.txt').write_text(text, encoding='utf-8')
++        (OUTDIR / f'{safe}.raw.json').write_text(raw, encoding='utf-8')
++        usage = parsed.get('usage', {}) if isinstance(parsed, dict) else {}
++        out_tok = int(usage.get('completion_tokens') or 0)
++        rec = {
++            'config': 'cp015_current_fork_zlab_dflash_kvflash_cfg',
++            'cat': cat,
++            'task': task,
++            'status': status,
++            'error': error,
++            'wall_s': round(wall, 3),
++            'tokens': out_tok,
++            'tps': round(out_tok / wall, 1) if wall > 0 else 0,
++            'qscore': round(qscore, 3),
++            'passed': passed,
++            'qnote': qnote,
++            'usage': usage,
++            'metrics': parse_metrics(log_path, before),
++            'output': str(OUTDIR / f'{safe}.txt'),
++            'raw': str(OUTDIR / f'{safe}.raw.json'),
++            'log': str(log_path),
++            'preview': text[:200].replace('\n', ' '),
++        }
++        rows.append(rec)
++        SUMMARY.open('a').write(json.dumps(rec) + '\n')
++        print('RESULT ' + json.dumps({k: rec[k] for k in ['task','status','error','wall_s','tokens','tps','passed','qnote','metrics']}), flush=True)
++        time.sleep(1)
++    comp = build_comparison(rows)
++    print('COMPARISON ' + json.dumps(comp['anchors']['cp015_current_fork_zlab_dflash_kvflash_cfg']), flush=True)
++    print('COMPARE=' + str(COMPARE), flush=True)
++finally:
++    print('STOP server', flush=True)
++    stop_proc(proc)
++    logf.close()
++    time.sleep(2)
++    if port_listening():
++        subprocess.run(['bash','-lc',f'fuser -k {PORT}/tcp || true'])
++print(f'DONE RUN_DIR={RUN}', flush=True)

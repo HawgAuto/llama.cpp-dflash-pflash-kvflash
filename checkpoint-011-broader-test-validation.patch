@@ -1,0 +1,765 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index c289ff7..e31e8a5 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -1485,6 +1485,84 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             params.cache_idle_slots = value;
+         }
+     ).set_env("LLAMA_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kvflash"}, "N|auto",
++        "experimental: resident KVFlash pool tokens, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value == "auto") {
++                params.kvflash_tokens = -1;
++                return;
++            }
++            params.kvflash_tokens = std::stoi(value);
++            if (params.kvflash_tokens < 0) {
++                throw std::invalid_argument("kvflash must be non-negative or auto");
++            }
++        }
++    ).set_env("LLAMA_ARG_KVFLASH").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-policy"}, "POLICY",
++        "experimental: KVFlash eviction/scoring policy: lru, qk, or drafter (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "lru" && value != "qk" && value != "drafter") {
++                throw std::invalid_argument("kvflash-policy must be one of: lru, qk, drafter");
++            }
++            params.kvflash_policy = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_POLICY").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-tau"}, "N",
++        string_format("experimental: KVFlash scoring/reselection interval (default: %d)", params.kvflash_tau),
++        [](common_params & params, int value) {
++            if (value <= 0) {
++                throw std::invalid_argument("kvflash-tau must be positive");
++            }
++            params.kvflash_tau = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_TAU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--kvflash-drafter"}, "FNAME",
++        "experimental: KVFlash drafter model path for drafter policy (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.kvflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_KVFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-drafter", "--prefill-drafter"}, "FNAME",
++        "experimental: PFlash prefill drafter model path (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            params.pflash_drafter = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-keep-ratio"}, "N",
++        string_format("experimental: PFlash prompt keep ratio (default: %.2f)", params.pflash_keep_ratio),
++        [](common_params & params, const std::string & value) {
++            params.pflash_keep_ratio = std::stof(value);
++            if (params.pflash_keep_ratio <= 0.0f || params.pflash_keep_ratio > 1.0f) {
++                throw std::invalid_argument("pflash-keep-ratio must be in (0, 1]");
++            }
++        }
++    ).set_env("LLAMA_ARG_PFLASH_KEEP_RATIO").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-mode"}, "MODE",
++        "experimental: PFlash mode: off, always, or auto (currently parsed only in this fork)",
++        [](common_params & params, const std::string & value) {
++            if (value != "off" && value != "always" && value != "auto") {
++                throw std::invalid_argument("pflash-mode must be one of: off, always, auto");
++            }
++            params.pflash_mode = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_MODE").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
++    add_opt(common_arg(
++        {"--pflash-drafter-gpu"}, "N",
++        string_format("experimental: PFlash drafter GPU index (default: %d)", params.pflash_drafter_gpu),
++        [](common_params & params, int value) {
++            if (value < 0) {
++                throw std::invalid_argument("pflash-drafter-gpu must be non-negative");
++            }
++            params.pflash_drafter_gpu = value;
++        }
++    ).set_env("LLAMA_ARG_PFLASH_DRAFTER_GPU").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+     add_opt(common_arg(
+         {"--context-shift"},
+         {"--no-context-shift"},
+diff --git a/common/common.cpp b/common/common.cpp
+index 0dd9ede..ff11722 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -394,6 +394,19 @@ void common_params_print_info(const common_params & params, bool print_devices)
+         }
+     }
+     COM_TRC("%s\n", common_params_get_system_info(params).c_str());
++
++    if (params.kvflash_tokens != 0 || params.pflash_mode != "off" || !params.pflash_drafter.empty()) {
++        COM_INF("%s: experimental Lucebox ports: kvflash=%d policy=%s tau=%d pflash_mode=%s pflash_keep_ratio=%.3f\n",
++                __func__, params.kvflash_tokens, params.kvflash_policy.c_str(), params.kvflash_tau,
++                params.pflash_mode.c_str(), params.pflash_keep_ratio);
++        if (!params.kvflash_drafter.empty()) {
++            COM_INF("%s: experimental kvflash_drafter = %s\n", __func__, params.kvflash_drafter.c_str());
++        }
++        if (!params.pflash_drafter.empty()) {
++            COM_INF("%s: experimental pflash_drafter = %s gpu=%d\n", __func__, params.pflash_drafter.c_str(), params.pflash_drafter_gpu);
++        }
++        COM_WRN("%s", "experimental PFlash/KVFlash runtime wiring is incomplete in this checkpoint; parsed flags are no-ops unless a later patch wires them into inference\n");
++    }
+ }
+ 
+ std::string common_params_get_system_info(const common_params & params) {
+diff --git a/common/common.h b/common/common.h
+index 2adb310..94cc649 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -569,6 +569,18 @@ struct common_params {
+     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
+     bool kv_unified        = false; // enable unified KV cache
+ 
++    // Experimental Lucebox feature ports. These are parsed and reported by this
++    // fork first; runtime wiring is added behind these fields.
++    int32_t kvflash_tokens = 0;
++    int32_t kvflash_tau    = 64;
++    std::string kvflash_policy = "lru";
++    std::string kvflash_drafter = "";
++
++    std::string pflash_drafter = "";
++    float       pflash_keep_ratio = 1.0f;
++    std::string pflash_mode = "off";
++    int32_t     pflash_drafter_gpu = 0;
++
+     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
+     bool use_mmap          = true;  // enable mmap to use filesystem cache
+     bool use_direct_io     = false; // read from disk without buffering
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 06f236b..c94b69b 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -18,11 +18,18 @@
+ #include "mtmd-helper.h"
+ 
+ #include <algorithm>
++#include <cerrno>
++#include <cmath>
+ #include <cstddef>
+ #include <cinttypes>
++#include <cstdio>
++#include <cstdlib>
+ #include <exception>
+ #include <memory>
+ #include <filesystem>
++#include <limits>
++#include <sstream>
++#include <unistd.h>
+ #include <utility>
+ #include <fstream>
+ 
+@@ -937,6 +944,78 @@ private:
+ 
+     int64_t t_last_load_progress_ms = 0;
+ 
++    struct kvflash_resident_pool_state {
++        bool initialized = false;
++        int32_t capacity_tokens = 0;
++        int32_t resident_tokens = 0;
++        uint64_t entries = 0;
++        uint64_t hits = 0;
++        uint64_t misses = 0;
++        uint64_t evictions = 0;
++        uint64_t dry_run_scores = 0;
++        uint64_t dry_run_candidate_tokens = 0;
++        uint64_t simulated_eviction_checks = 0;
++        uint64_t simulated_eviction_candidates = 0;
++    };
++
++    kvflash_resident_pool_state kvflash_pool;
++
++    void init_kvflash_resident_pool_state() {
++        kvflash_pool = {};
++        if (params_base.kvflash_tokens == 0) {
++            return;
++        }
++        kvflash_pool.initialized = true;
++        kvflash_pool.capacity_tokens = params_base.kvflash_tokens;
++    }
++
++    json get_kvflash_status() const {
++        const bool configured = params_base.kvflash_tokens != 0;
++        return json {
++            {"configured",       configured},
++            {"active",           false},
++            {"tokens",           params_base.kvflash_tokens},
++            {"policy",           params_base.kvflash_policy},
++            {"tau",              params_base.kvflash_tau},
++            {"drafter",          params_base.kvflash_drafter},
++            {"resident_pool", json {
++                {"initialized",     kvflash_pool.initialized},
++                {"capacity_tokens", kvflash_pool.capacity_tokens},
++                {"resident_tokens", kvflash_pool.resident_tokens},
++                {"entries",         kvflash_pool.entries},
++                {"hits",            kvflash_pool.hits},
++                {"misses",          kvflash_pool.misses},
++                {"evictions",       kvflash_pool.evictions},
++                {"dry_run_scores",  kvflash_pool.dry_run_scores},
++                {"dry_run_candidate_tokens", kvflash_pool.dry_run_candidate_tokens},
++                {"simulated_eviction_checks", kvflash_pool.simulated_eviction_checks},
++                {"simulated_eviction_candidates", kvflash_pool.simulated_eviction_candidates},
++            }},
++            {"note",             configured ? "configured but not active" : "disabled"},
++        };
++    }
++
++    void log_kvflash_status() const {
++        if (params_base.kvflash_tokens == 0) {
++            SRV_INF("%s", "experimental KVFlash disabled\n");
++            return;
++        }
++
++        SRV_INF("experimental KVFlash configured but not active: tokens=%d policy=%s tau=%d drafter=%s resident_pool_initialized=%s resident_tokens=%d entries=%" PRIu64 " hits=%" PRIu64 " misses=%" PRIu64 " evictions=%" PRIu64 " dry_run_scores=%" PRIu64 " dry_run_candidate_tokens=%" PRIu64 "\n",
++                params_base.kvflash_tokens,
++                params_base.kvflash_policy.c_str(),
++                params_base.kvflash_tau,
++                params_base.kvflash_drafter.empty() ? "<none>" : params_base.kvflash_drafter.c_str(),
++                kvflash_pool.initialized ? "true" : "false",
++                kvflash_pool.resident_tokens,
++                kvflash_pool.entries,
++                kvflash_pool.hits,
++                kvflash_pool.misses,
++                kvflash_pool.evictions,
++                kvflash_pool.dry_run_scores,
++                kvflash_pool.dry_run_candidate_tokens);
++    }
++
+     void destroy() {
+         spec.reset();
+         ctx_dft.reset();
+@@ -1327,6 +1406,8 @@ private:
+         // setup slots
+         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
+                 params_base.n_parallel, n_ctx_slot, params_base.kv_unified ? "true" : "false");
++        init_kvflash_resident_pool_state();
++        log_kvflash_status();
+ 
+         // initialize slots
+         for (int i = 0; i < params_base.n_parallel; i++) {
+@@ -2360,6 +2441,235 @@ private:
+                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
+     }
+ 
++    static std::string shell_quote(const std::string & s) {
++        std::string out = "'";
++        for (char c : s) {
++            if (c == '\'') {
++                out += "'\\''";
++            } else {
++                out += c;
++            }
++        }
++        out += "'";
++        return out;
++    }
++
++    static bool write_pflash_token_file(const std::string & path, const llama_tokens & src) {
++        std::ofstream out(path);
++        if (!out) {
++            return false;
++        }
++        for (llama_token tok : src) {
++            out << tok << '\n';
++        }
++        return true;
++    }
++
++    static bool read_pflash_token_stdout(FILE * pipe, llama_tokens & dst) {
++        char buf[4096];
++        std::string data;
++        while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
++            data += buf;
++            if (data.size() > 64u * 1024u * 1024u) {
++                return false;
++            }
++        }
++
++        std::istringstream iss(data);
++        int64_t id = 0;
++        while (iss >> id) {
++            if (id < std::numeric_limits<llama_token>::min() || id > std::numeric_limits<llama_token>::max()) {
++                return false;
++            }
++            dst.push_back((llama_token) id);
++            if (dst.size() > 10000000) {
++                return false;
++            }
++            if (iss.peek() == ',' || iss.peek() == ';') {
++                iss.ignore();
++            }
++        }
++        return !dst.empty();
++    }
++
++    static std::filesystem::path make_pflash_token_path(std::error_code & ec) {
++        std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
++        if (ec) {
++            return {};
++        }
++
++        std::string tmpl = (dir / "llama-pflash-tokens-XXXXXX").string();
++        std::vector<char> path(tmpl.begin(), tmpl.end());
++        path.push_back('\0');
++
++        const int fd = mkstemp(path.data());
++        if (fd < 0) {
++            ec = std::error_code(errno, std::generic_category());
++            return {};
++        }
++        close(fd);
++        return std::filesystem::path(path.data());
++    }
++
++    static bool pflash_is_subsequence(const llama_tokens & src, const llama_tokens & dst) {
++        size_t pos = 0;
++        for (llama_token tok : src) {
++            if (pos < dst.size() && dst[pos] == tok) {
++                ++pos;
++            }
++        }
++        return pos == dst.size();
++    }
++
++    static bool validate_pflash_compressed_tokens(
++            const llama_tokens & src, const llama_tokens & dst, size_t n_keep, const char * source) {
++        if (dst.size() < 2 || dst.size() >= src.size() || dst.size() > n_keep) {
++            SRV_WRN("PFlash %s result rejected: length %zu is invalid for source length %zu and keep target %zu\n",
++                    source, dst.size(), src.size(), n_keep);
++            return false;
++        }
++        if (dst.front() != src.front() || dst.back() != src.back()) {
++            SRV_WRN("PFlash %s result rejected: first and last prompt tokens must be preserved\n", source);
++            return false;
++        }
++        if (!pflash_is_subsequence(src, dst)) {
++            SRV_WRN("PFlash %s result rejected: output must be an ordered subsequence of the original prompt\n", source);
++            return false;
++        }
++        return true;
++    }
++
++    bool maybe_run_pflash_drafter_helper(const llama_tokens & src, size_t n_keep, llama_tokens & dst) {
++        dst.clear();
++        if (params_base.pflash_drafter.empty()) {
++            return false;
++        }
++        std::error_code ec;
++        if (!std::filesystem::is_regular_file(params_base.pflash_drafter, ec) ||
++                (std::filesystem::status(params_base.pflash_drafter, ec).permissions() &
++                 (std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec | std::filesystem::perms::others_exec)) == std::filesystem::perms::none) {
++            return false;
++        }
++
++        const std::filesystem::path token_path = make_pflash_token_path(ec);
++        if (ec || token_path.empty() || !write_pflash_token_file(token_path.string(), src)) {
++            SRV_WRN("PFlash helper skipped: failed to write token file: %s\n", token_path.string().c_str());
++            return false;
++        }
++
++        const std::string cmd = shell_quote(params_base.pflash_drafter) + " " +
++            shell_quote(token_path.string()) + " " +
++            std::to_string(params_base.pflash_keep_ratio) + " " +
++            std::to_string(params_base.pflash_drafter_gpu);
++        FILE * pipe = popen(cmd.c_str(), "r");
++        bool ok = false;
++        if (pipe != nullptr) {
++            ok = read_pflash_token_stdout(pipe, dst);
++            const int rc = pclose(pipe);
++            ok = ok && rc == 0;
++        }
++        std::filesystem::remove(token_path, ec);
++
++        ok = ok && validate_pflash_compressed_tokens(src, dst, n_keep, "helper");
++        if (!ok) {
++            SRV_WRN("PFlash helper failed; falling back to built-in uniform compression: %s\n", params_base.pflash_drafter.c_str());
++            dst.clear();
++            return false;
++        }
++        return true;
++    }
++
++    llama_tokens pflash_uniform_compress(const llama_tokens & src, size_t n_keep) const {
++        llama_tokens dst;
++        dst.reserve(n_keep);
++        dst.push_back(src.front());
++
++        const size_t n_middle = n_keep - 2;
++        for (size_t i = 0; i < n_middle; ++i) {
++            const size_t idx = 1 + ((i + 1) * (src.size() - 2)) / (n_middle + 1);
++            dst.push_back(src[idx]);
++        }
++
++        dst.push_back(src.back());
++        return dst;
++    }
++
++    bool maybe_score_kvflash_dry_run(const server_task & task) {
++        if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0) {
++            return false;
++        }
++        if (task.type != SERVER_TASK_TYPE_COMPLETION && task.type != SERVER_TASK_TYPE_INFILL) {
++            return false;
++        }
++        if (task.tokens.has_mtmd) {
++            return false;
++        }
++
++        const llama_tokens & src = task.tokens.get_tokens();
++        if (src.empty()) {
++            return false;
++        }
++
++        const uint64_t candidate_tokens = (uint64_t) std::min<size_t>(src.size(), (size_t) params_base.kvflash_tokens);
++        const int64_t simulated_overflow =
++            (int64_t) kvflash_pool.resident_tokens + (int64_t) candidate_tokens - (int64_t) kvflash_pool.capacity_tokens;
++        const uint64_t simulated_eviction_candidates = simulated_overflow > 0 ? (uint64_t) simulated_overflow : 0;
++        kvflash_pool.dry_run_scores++;
++        kvflash_pool.dry_run_candidate_tokens += candidate_tokens;
++        kvflash_pool.simulated_eviction_checks++;
++        kvflash_pool.simulated_eviction_candidates += simulated_eviction_candidates;
++        kvflash_pool.misses++;
++
++        SRV_DBG("experimental KVFlash dry-run score: task=%d tokens=%zu candidate_tokens=%" PRIu64 " simulated_eviction_candidates=%" PRIu64 " policy=%s tau=%d active=false\n",
++                task.id, src.size(), candidate_tokens, simulated_eviction_candidates, params_base.kvflash_policy.c_str(), params_base.kvflash_tau);
++        return true;
++    }
++
++    bool maybe_apply_pflash_prompt_compression(server_task & task) {
++        if (params_base.pflash_mode != "always") {
++            return false;
++        }
++        if (params_base.pflash_keep_ratio >= 1.0f) {
++            return false;
++        }
++        if (task.type != SERVER_TASK_TYPE_COMPLETION && task.type != SERVER_TASK_TYPE_INFILL) {
++            return false;
++        }
++        if (task.tokens.has_mtmd) {
++            SRV_WRN("PFlash compression skipped for task %d: multimodal prompts are not supported yet\n", task.id);
++            return false;
++        }
++
++        const llama_tokens & src = task.tokens.get_tokens();
++        const size_t n_src = src.size();
++        if (n_src < 4) {
++            return false;
++        }
++
++        const size_t n_keep = std::max<size_t>(2, (size_t) std::ceil((double) n_src * params_base.pflash_keep_ratio));
++        if (n_keep >= n_src) {
++            return false;
++        }
++
++        llama_tokens dst;
++        const bool helper_ok = maybe_run_pflash_drafter_helper(src, n_keep, dst);
++        if (!helper_ok) {
++            dst = pflash_uniform_compress(src, n_keep);
++        }
++        if (!validate_pflash_compressed_tokens(src, dst, n_keep, helper_ok ? "helper" : "uniform")) {
++            SRV_WRN("PFlash compression skipped for task %d: unusable result for source length %zu and keep target %zu\n",
++                    task.id, n_src, n_keep);
++            return false;
++        }
++
++        task.tokens = server_tokens(dst, false);
++
++        SRV_WRN("experimental PFlash compressed task %d prompt tokens: %zu -> %zu, mode=%s, keep_ratio=%.3f, drafter=%s\n",
++                task.id, n_src, dst.size(), params_base.pflash_mode.c_str(), params_base.pflash_keep_ratio,
++                helper_ok ? "helper" : "uniform-fallback");
++        return true;
++    }
++
+     void process_single_task(server_task && task) {
+         switch (task.type) {
+             case SERVER_TASK_TYPE_COMPLETION:
+@@ -2375,6 +2685,9 @@ private:
+                         }
+                     }
+ 
++                    maybe_score_kvflash_dry_run(task);
++                    maybe_apply_pflash_prompt_compression(task);
++
+                     const int id_task = task.id;
+ 
+                     server_slot * slot = get_available_slot(task);
+@@ -3989,6 +4302,7 @@ server_context_meta server_context::get_meta() const {
+         /* json_ui_settings       */ impl->json_ui_settings,
+         /* slot_n_ctx             */ impl->get_slot_n_ctx(),
+         /* pooling_type           */ llama_pooling_type(impl->ctx_tgt),
++        /* kvflash_status         */ impl->get_kvflash_status(),
+ 
+         /* chat_params            */ impl->chat_params,
+         /* chat_template_caps     */ common_chat_templates_get_caps(impl->chat_params.tmpls.get()),
+@@ -4576,6 +4890,7 @@ void server_routes::init_routes() {
+             { "build_info",                  meta->build_info },
+             { "is_sleeping",                 queue_tasks.is_sleeping() },
+             { "cors_proxy_enabled",          params.ui_mcp_proxy },
++            { "kvflash",                     meta->kvflash_status },
+         };
+         if (params.use_jinja) {
+             if (!tmpl_tools.empty()) {
+diff --git a/tools/server/server-context.h b/tools/server/server-context.h
+index 952f825..520d0ff 100644
+--- a/tools/server/server-context.h
++++ b/tools/server/server-context.h
+@@ -25,6 +25,7 @@ struct server_context_meta {
+     json json_ui_settings;
+     int slot_n_ctx;
+     enum llama_pooling_type pooling_type;
++    json kvflash_status;
+ 
+     // chat params
+     server_chat_params & chat_params;
+diff --git a/tools/server/pflash-uniform-helper.py b/tools/server/pflash-uniform-helper.py
+new file mode 100755
+index 0000000..5008119
+--- /dev/null
++++ b/tools/server/pflash-uniform-helper.py
+@@ -0,0 +1,80 @@
++#!/usr/bin/env python3
++"""Reference PFlash helper for the llama-server experimental helper protocol.
++
++Usage:
++    pflash-uniform-helper.py <token-file> <keep-ratio> <pflash-drafter-gpu>
++
++The third argument is accepted for protocol compatibility and ignored. The
++helper prints surviving token ids to stdout, one line, space separated.
++"""
++
++from __future__ import annotations
++
++import math
++import pathlib
++import sys
++
++
++def fail(message: str) -> int:
++    print(f"pflash-uniform-helper: {message}", file=sys.stderr)
++    return 2
++
++
++def parse_tokens(path: pathlib.Path) -> list[int]:
++    tokens: list[int] = []
++    for line_no, line in enumerate(path.read_text().splitlines(), 1):
++        text = line.strip()
++        if not text:
++            continue
++        try:
++            tokens.append(int(text, 10))
++        except ValueError as exc:
++            raise ValueError(f"invalid token on line {line_no}: {text!r}") from exc
++    return tokens
++
++
++def uniform_keep(tokens: list[int], keep_ratio: float) -> list[int]:
++    if len(tokens) < 4:
++        return tokens
++
++    n_keep = max(2, math.ceil(len(tokens) * keep_ratio))
++    if n_keep >= len(tokens):
++        return tokens
++
++    out = [tokens[0]]
++    n_middle = n_keep - 2
++    for i in range(n_middle):
++        idx = 1 + ((i + 1) * (len(tokens) - 2)) // (n_middle + 1)
++        out.append(tokens[idx])
++    out.append(tokens[-1])
++    return out
++
++
++def main(argv: list[str]) -> int:
++    if len(argv) != 4:
++        return fail("expected: <token-file> <keep-ratio> <pflash-drafter-gpu>")
++
++    token_path = pathlib.Path(argv[1])
++    try:
++        keep_ratio = float(argv[2])
++    except ValueError:
++        return fail("keep-ratio must be a number")
++
++    if not (0.0 < keep_ratio < 1.0):
++        return fail("keep-ratio must be greater than 0 and less than 1")
++    if not token_path.is_file():
++        return fail(f"token file not found: {token_path}")
++
++    try:
++        tokens = parse_tokens(token_path)
++    except Exception as exc:
++        return fail(str(exc))
++    if not tokens:
++        return fail("token file is empty")
++
++    print(" ".join(str(tok) for tok in uniform_keep(tokens, keep_ratio)))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main(sys.argv))
+diff --git a/PORT_STATUS.md b/PORT_STATUS.md
+new file mode 100644
+index 0000000..1683dfd
+--- /dev/null
++++ b/PORT_STATUS.md
+@@ -0,0 +1,152 @@
++# PFlash/KVFlash Port Status
++
++## Base
++
++- Fork path: `${LLAMA_CPP_DIR}`
++- Base upstream commit: `dbdaece23de9ac63f2e7ca9e6bfcdc4fc156a3fa`
++- Branch: `local-user/dflash-pflash-kvflash`
++
++## Checkpoint 001 - CLI/config scaffold
++
++Added experimental CLI/config fields for:
++
++- `--kvflash N|auto`
++- `--kvflash-policy lru|qk|drafter`
++- `--kvflash-tau N`
++- `--kvflash-drafter FNAME`
++- `--prefill-drafter FNAME`
++- `--pflash-drafter FNAME`
++- `--pflash-keep-ratio N`
++- `--pflash-mode off|always|auto`
++- `--pflash-drafter-gpu N`
++
++These parse and log at startup. Default behavior is unchanged.
++
++## Checkpoint 002 - first PFlash runtime hook
++
++Added a narrowly gated server task hook in `tools/server/server-context.cpp`:
++
++- Only runs when `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- Only applies to completion/infill tasks.
++- Skips multimodal prompts.
++- Keeps the first and last token and uniformly samples the middle tokens down to the requested keep ratio.
++- Logs `experimental PFlash compressed task ...` when it modifies a prompt.
++
++This is not the final Lucebox drafter-driven PFlash algorithm. It is a safe integration slice that proves the upstream server can route prompt-token compression through the task boundary without changing default behavior. The next step is replacing the uniform thinning placeholder with real drafter scoring/compression.
++
++## Checkpoint 003 - PFlash drafter-helper bridge
++
++Reworked the PFlash hook so `--pflash-drafter` is no longer only a logged path:
++
++- If `--pflash-drafter` points to an executable helper, the server writes the prompt token IDs to a temporary file and runs:
++  - `<helper> <token-file> <keep-ratio> <pflash-drafter-gpu>`
++- The helper is expected to print surviving token IDs to stdout, separated by whitespace, commas, or semicolons.
++- A successful helper result replaces the prompt tokens and logs `drafter=helper`.
++- If no executable helper is configured, or the helper fails, the hook falls back to checkpoint-002 uniform compression and logs `drafter=uniform-fallback`.
++- Invalid helper output is rejected if it is empty, shorter than 2 tokens, or not actually compressed.
++
++This is a bridge for connecting the Lucebox drafter scorer/IPC daemon without pulling the whole custom backend into upstream in one patch. A true in-process GGUF drafter loader is still pending.
++
++## Checkpoint 004 - PFlash helper contract hardening
++
++Tightened the checkpoint-003 helper bridge so external drafter output cannot silently mutate prompts into an unsafe shape:
++
++- Temporary token files are now created with `mkstemp` under the system temp directory instead of a predictable `this`-pointer filename.
++- Helper output must preserve the first and last prompt token.
++- Helper output must be an ordered subsequence of the original prompt tokens.
++- Helper output must be no longer than the computed keep target from `--pflash-keep-ratio`.
++- The built-in uniform fallback now goes through the same validation path before prompt mutation.
++
++This checkpoint keeps the helper bridge external and experimental, but makes the protocol strict enough for a real Lucebox scorer/helper to plug in without accepting reordered, invented, or under-compressed token streams.
++
++## Checkpoint 005 - KVFlash visibility scaffold
++
++Started the KVFlash runtime side without changing KV-cache behavior:
++
++- Server initialization now logs whether experimental KVFlash is disabled or configured-but-not-active.
++- The `/props` response now includes a `kvflash` object with configured tokens, policy, tau, drafter, and `active=false`.
++- `--kvflash` remains a visibility/configuration scaffold only; no KV allocation, eviction, paging, attention-mask, or recall behavior is changed.
++
++This checkpoint makes KVFlash configuration observable before any risky KV-cache mutation work.
++
++## Checkpoint 006 - KVFlash resident pool skeleton
++
++Added an inert resident-pool state object for future KVFlash work:
++
++- Tracks configured capacity, resident token count, entries, hits, misses, and evictions.
++- Initializes only when `--kvflash` is configured.
++- Exposes the counters under `/props` as `kvflash.resident_pool`.
++- Logs the zeroed resident-pool counters at startup when KVFlash is configured.
++- Keeps `active=false` and does not allocate, evict, page, recall, or mutate any llama KV cache state.
++
++This checkpoint creates observable state for later dry-run scoring and eviction simulation without changing model execution.
++
++## Checkpoint 007 - KVFlash dry-run scoring hooks
++
++Added a dry-run scoring hook at the server task boundary:
++
++- Runs only when `--kvflash` is configured and only for completion/infill prompts.
++- Observes prompt length, policy, tau, and candidate-token budget before PFlash may alter the prompt.
++- Increments inert `dry_run_scores`, `dry_run_candidate_tokens`, and miss counters for visibility.
++- Exposes those counters in `/props` under `kvflash.resident_pool`.
++- Logs dry-run scoring at debug level with `active=false`.
++- Does not change task tokens, slot selection, KV cache state, attention masks, or generation behavior.
++
++This checkpoint creates the first policy-observation path needed for later eviction simulation while keeping KVFlash non-active.
++
++## Checkpoint 008 - KVFlash eviction simulation
++
++Extended the dry-run KVFlash path with eviction simulation counters:
++
++- Computes whether a prompt candidate would overflow the configured resident token budget.
++- Accumulates `simulated_eviction_checks` and `simulated_eviction_candidates` for `/props` visibility.
++- Logs simulated eviction candidates at debug level while keeping `active=false`.
++- Leaves real `entries`, `resident_tokens`, and `evictions` unchanged.
++- Does not call llama KV cache remove, clear, update, paging, or attention-mask paths.
++
++This checkpoint previews eviction pressure without performing eviction or changing generation behavior.
++
++## Checkpoint 009 - reproducible PFlash helper target
++
++Added a checked-in reference helper for the existing external PFlash helper protocol:
++
++- `tools/server/pflash-uniform-helper.py`
++- Accepts `<token-file> <keep-ratio> <pflash-drafter-gpu>`.
++- Reads one token id per line from the token file.
++- Emits a first/last-preserving ordered subsequence using the same deterministic uniform strategy as the built-in fallback.
++- Validates argument count, keep-ratio range, token-file existence, and token parsing.
++- Leaves in-process GGUF drafter loading/scoring still pending; this is a reproducible IPC/helper target for integration and testing.
++
++This checkpoint gives `--pflash-drafter` a repository-local executable target that exercises the hardened helper bridge without requiring Lucebox drafter model loading yet.
++
++## Checkpoint 010 - live model runtime validation attempt
++
++Attempted live runtime validation with the forked `build-hip-gfx1151/bin/llama-server` on port 18080 using `--no-mmap`, configured KVFlash, PFlash always mode, and the checked-in PFlash helper.
++
++Results:
++
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat.gguf` failed to load because tokenizer metadata was missing: `key not found in model: tokenizer.ggml.model`.
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat-tokenizer.gguf` failed to load because it was not a complete standalone model: `missing tensor 'fc.weight'`.
++- `qwen3.6-27b-dflash-zlab-q8_0.gguf` failed context initialization because standalone DFlash requires a paired context: `dflash requires ctx_other to be set`.
++- An existing healthy server on port 8080 was checked, but it is a separate CUDA build from `${HOME}/experiments/llamacpp-master-20260610` and does not expose this fork's KVFlash `/props` field, so it cannot validate this workspace.
++
++Live validation is therefore blocked until a standalone compatible GGUF is available for this fork, or the correct paired DFlash launch command/model set is provided. No running validation server was left behind.
++
++## Checkpoint 011 - broader test validation
++
++Built the missing CTest executables and ran broader validation:
++
++- Initial `ctest --test-dir build-hip-gfx1151 --output-on-failure` failed because test executables had not been built.
++- Built the missing test targets, then reran full CTest.
++- Full CTest exposed and fixed one real local regression: argument aliases now list `--pflash-drafter` before the longer `--prefill-drafter`, as required by `test-arg-parser`.
++- `test-arg-parser` passed after the fix.
++- Full CTest then had one remaining unrelated external-data failure: `test-tokenizers-ggml-vocabs` downloaded several invalid Git LFS pointer files and failed with `invalid magic characters: 'vers', expected 'GGUF'`.
++- The suite excluding that external-data test passed: `ctest --test-dir build-hip-gfx1151 -E '^test-tokenizers-ggml-vocabs$' --output-on-failure` reported `100% tests passed, 0 tests failed out of 53`.
++
++This is broader build/test validation for the fork. It is not live model runtime validation because Checkpoint 010 is blocked by unavailable compatible live model inputs.
++
++## Still pending
++
++- Real in-process PFlash drafter GGUF loading/scoring.
++- KVFlash real resident pool allocation, paging, attention mask integration, and recall.
++- Full live benchmark validation with a compatible live model.

@@ -1,0 +1,174 @@
+diff --git a/PORT_STATUS.md b/PORT_STATUS.md
+new file mode 100644
+index 0000000..5f96157
+--- /dev/null
++++ b/PORT_STATUS.md
+@@ -0,0 +1,168 @@
++# PFlash/KVFlash Port Status
++
++## Base
++
++- Fork path: `${LLAMA_CPP_DIR}`
++- Base upstream commit: `dbdaece23de9ac63f2e7ca9e6bfcdc4fc156a3fa`
++- Branch: `local-user/dflash-pflash-kvflash`
++
++## Checkpoint 001 - CLI/config scaffold
++
++Added experimental CLI/config fields for:
++
++- `--kvflash N|auto`
++- `--kvflash-policy lru|qk|drafter`
++- `--kvflash-tau N`
++- `--kvflash-drafter FNAME`
++- `--prefill-drafter FNAME`
++- `--pflash-drafter FNAME`
++- `--pflash-keep-ratio N`
++- `--pflash-mode off|always|auto`
++- `--pflash-drafter-gpu N`
++
++These parse and log at startup. Default behavior is unchanged.
++
++## Checkpoint 002 - first PFlash runtime hook
++
++Added a narrowly gated server task hook in `tools/server/server-context.cpp`:
++
++- Only runs when `--pflash-mode always` and `--pflash-keep-ratio < 1.0`.
++- Only applies to completion/infill tasks.
++- Skips multimodal prompts.
++- Keeps the first and last token and uniformly samples the middle tokens down to the requested keep ratio.
++- Logs `experimental PFlash compressed task ...` when it modifies a prompt.
++
++This is not the final Lucebox drafter-driven PFlash algorithm. It is a safe integration slice that proves the upstream server can route prompt-token compression through the task boundary without changing default behavior. The next step is replacing the uniform thinning placeholder with real drafter scoring/compression.
++
++## Checkpoint 003 - PFlash drafter-helper bridge
++
++Reworked the PFlash hook so `--pflash-drafter` is no longer only a logged path:
++
++- If `--pflash-drafter` points to an executable helper, the server writes the prompt token IDs to a temporary file and runs:
++  - `<helper> <token-file> <keep-ratio> <pflash-drafter-gpu>`
++- The helper is expected to print surviving token IDs to stdout, separated by whitespace, commas, or semicolons.
++- A successful helper result replaces the prompt tokens and logs `drafter=helper`.
++- If no executable helper is configured, or the helper fails, the hook falls back to checkpoint-002 uniform compression and logs `drafter=uniform-fallback`.
++- Invalid helper output is rejected if it is empty, shorter than 2 tokens, or not actually compressed.
++
++This is a bridge for connecting the Lucebox drafter scorer/IPC daemon without pulling the whole custom backend into upstream in one patch. A true in-process GGUF drafter loader is still pending.
++
++## Checkpoint 004 - PFlash helper contract hardening
++
++Tightened the checkpoint-003 helper bridge so external drafter output cannot silently mutate prompts into an unsafe shape:
++
++- Temporary token files are now created with `mkstemp` under the system temp directory instead of a predictable `this`-pointer filename.
++- Helper output must preserve the first and last prompt token.
++- Helper output must be an ordered subsequence of the original prompt tokens.
++- Helper output must be no longer than the computed keep target from `--pflash-keep-ratio`.
++- The built-in uniform fallback now goes through the same validation path before prompt mutation.
++
++This checkpoint keeps the helper bridge external and experimental, but makes the protocol strict enough for a real Lucebox scorer/helper to plug in without accepting reordered, invented, or under-compressed token streams.
++
++## Checkpoint 005 - KVFlash visibility scaffold
++
++Started the KVFlash runtime side without changing KV-cache behavior:
++
++- Server initialization now logs whether experimental KVFlash is disabled or configured-but-not-active.
++- The `/props` response now includes a `kvflash` object with configured tokens, policy, tau, drafter, and `active=false`.
++- `--kvflash` remains a visibility/configuration scaffold only; no KV allocation, eviction, paging, attention-mask, or recall behavior is changed.
++
++This checkpoint makes KVFlash configuration observable before any risky KV-cache mutation work.
++
++## Checkpoint 006 - KVFlash resident pool skeleton
++
++Added an inert resident-pool state object for future KVFlash work:
++
++- Tracks configured capacity, resident token count, entries, hits, misses, and evictions.
++- Initializes only when `--kvflash` is configured.
++- Exposes the counters under `/props` as `kvflash.resident_pool`.
++- Logs the zeroed resident-pool counters at startup when KVFlash is configured.
++- Keeps `active=false` and does not allocate, evict, page, recall, or mutate any llama KV cache state.
++
++This checkpoint creates observable state for later dry-run scoring and eviction simulation without changing model execution.
++
++## Checkpoint 007 - KVFlash dry-run scoring hooks
++
++Added a dry-run scoring hook at the server task boundary:
++
++- Runs only when `--kvflash` is configured and only for completion/infill prompts.
++- Observes prompt length, policy, tau, and candidate-token budget before PFlash may alter the prompt.
++- Increments inert `dry_run_scores`, `dry_run_candidate_tokens`, and miss counters for visibility.
++- Exposes those counters in `/props` under `kvflash.resident_pool`.
++- Logs dry-run scoring at debug level with `active=false`.
++- Does not change task tokens, slot selection, KV cache state, attention masks, or generation behavior.
++
++This checkpoint creates the first policy-observation path needed for later eviction simulation while keeping KVFlash non-active.
++
++## Checkpoint 008 - KVFlash eviction simulation
++
++Extended the dry-run KVFlash path with eviction simulation counters:
++
++- Computes whether a prompt candidate would overflow the configured resident token budget.
++- Accumulates `simulated_eviction_checks` and `simulated_eviction_candidates` for `/props` visibility.
++- Logs simulated eviction candidates at debug level while keeping `active=false`.
++- Leaves real `entries`, `resident_tokens`, and `evictions` unchanged.
++- Does not call llama KV cache remove, clear, update, paging, or attention-mask paths.
++
++This checkpoint previews eviction pressure without performing eviction or changing generation behavior.
++
++## Checkpoint 009 - reproducible PFlash helper target
++
++Added a checked-in reference helper for the existing external PFlash helper protocol:
++
++- `tools/server/pflash-uniform-helper.py`
++- Accepts `<token-file> <keep-ratio> <pflash-drafter-gpu>`.
++- Reads one token id per line from the token file.
++- Emits a first/last-preserving ordered subsequence using the same deterministic uniform strategy as the built-in fallback.
++- Validates argument count, keep-ratio range, token-file existence, and token parsing.
++- Leaves in-process GGUF drafter loading/scoring still pending; this is a reproducible IPC/helper target for integration and testing.
++
++This checkpoint gives `--pflash-drafter` a repository-local executable target that exercises the hardened helper bridge without requiring Lucebox drafter model loading yet.
++
++## Checkpoint 010 - live model runtime validation attempt
++
++Attempted live runtime validation with the forked `build-hip-gfx1151/bin/llama-server` on port 18080 using `--no-mmap`, configured KVFlash, PFlash always mode, and the checked-in PFlash helper.
++
++Results:
++
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat.gguf` failed to load because tokenizer metadata was missing: `key not found in model: tokenizer.ggml.model`.
++- `dflash-draft-3.6-q4_k_m.official-dflash-compat-tokenizer.gguf` failed to load because it was not a complete standalone model: `missing tensor 'fc.weight'`.
++- `qwen3.6-27b-dflash-zlab-q8_0.gguf` failed context initialization because standalone DFlash requires a paired context: `dflash requires ctx_other to be set`.
++- An existing healthy server on port 8080 was checked, but it is a separate CUDA build from `${HOME}/experiments/llamacpp-master-20260610` and does not expose this fork's KVFlash `/props` field, so it cannot validate this workspace.
++
++Live validation is therefore blocked until a standalone compatible GGUF is available for this fork, or the correct paired DFlash launch command/model set is provided. No running validation server was left behind.
++
++## Checkpoint 011 - broader test validation
++
++Built the missing CTest executables and ran broader validation:
++
++- Initial `ctest --test-dir build-hip-gfx1151 --output-on-failure` failed because test executables had not been built.
++- Built the missing test targets, then reran full CTest.
++- Full CTest exposed and fixed one real local regression: argument aliases now list `--pflash-drafter` before the longer `--prefill-drafter`, as required by `test-arg-parser`.
++- `test-arg-parser` passed after the fix.
++- Full CTest then had one remaining unrelated external-data failure: `test-tokenizers-ggml-vocabs` downloaded several invalid Git LFS pointer files and failed with `invalid magic characters: 'vers', expected 'GGUF'`.
++- The suite excluding that external-data test passed: `ctest --test-dir build-hip-gfx1151 -E '^test-tokenizers-ggml-vocabs$' --output-on-failure` reported `100% tests passed, 0 tests failed out of 53`.
++
++This is broader build/test validation for the fork. It is not live model runtime validation because Checkpoint 010 is blocked by unavailable compatible live model inputs.
++
++## Checkpoint 012 - paired DFlash live smoke validation
++
++Validated this fork with the known-good paired Qwen3.6 DFlash model set that previously benchmarked successfully on the upstream DFlash server:
++
++- Target model: `${EXPERIMENTS_DIR}/lucebox-campaign/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf`.
++- Draft model: `${INFERENCE_WORKSPACE}/ops/lucebox-kvflash-hermes-test-20260628/models/hf-spiritbuun-qwen36-dflash/dflash-draft-3.6-q8_0.official-dflash-compat.gguf`.
++- Launch used this fork's `build-hip-gfx1151/bin/llama-server` with `--no-mmap`, `--spec-type draft-dflash`, `-md`, `--jinja`, Q8 KV cache, configured KVFlash, and the checked-in PFlash helper.
++- The legacy reference flag `-cd 4096` is not accepted by this fork's current CLI, so the successful smoke omitted it.
++- `/health` returned `{"status":"ok"}` on port 18080.
++- `/props` showed this fork's `kvflash` object with `configured=true`, `active=false`, `tokens=1024`, `policy=qk`, and initialized zeroed resident-pool counters.
++- Live `/completion` requests generated text and reported speculative DFlash timing fields, including `draft_n` and `draft_n_accepted`.
++- Server logs showed `common_speculative_impl_draft_dflash: adding speculative implementation 'draft-dflash'` and PFlash helper compression such as `experimental PFlash compressed task ... drafter=helper`.
++- No validation server was left running after the smoke.
++
++This checkpoint resolves the previous live-validation blocker for this fork at smoke-test scope. It is not a full benchmark pass and does not activate real KVFlash mutation; KVFlash remains configured but inactive.
++
++## Still pending
++
++- Real in-process PFlash drafter GGUF loading/scoring.
++- KVFlash real resident pool allocation, paging, attention mask integration, and recall.
++- Full live benchmark validation with the paired Qwen3.6 DFlash model set.

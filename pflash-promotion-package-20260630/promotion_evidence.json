@@ -1,0 +1,229 @@
+{
+  "generated_utc": "20260630T011925Z",
+  "head": "6b33a43",
+  "tags_at_head": [
+    "cp030-pflash-2pass-quality-gate"
+  ],
+  "promotion_claim": {
+    "status": "promote scoped slice",
+    "endpoint": "/v1/chat/completions",
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "pflash_score": "model",
+    "pflash_keep_ratio": 0.1,
+    "contexts_validated": [
+      8000,
+      16000,
+      24000
+    ],
+    "spot_checks": [
+      32000
+    ],
+    "recommended_operating_mode": "separate long-lived opt-in optimizer shim: CP030 PFlash quality gate now, future dynamic DFlash policy control",
+    "optimizer_shim_direction": {
+      "status": "recommended long-term product shape",
+      "owns": [
+        "PFlash smart routing",
+        "2-pass quality gating",
+        "direct fallback policy",
+        "future dynamic DFlash parameter changes"
+      ],
+      "server_boundary": "llama-server exposes low-level mechanisms; the shim owns adaptive routing and quality/latency policy"
+    },
+    "scorer_followup": {
+      "status": "first runtime-compatible true in-process scorer candidate found",
+      "recommended_default": "Qwen3.5-0.8B Q4_K_M GGUF",
+      "quality_validation_candidate": "Qwen3.5-0.8B BF16 GGUF",
+      "validated_contexts": [
+        8000,
+        16000,
+        24000
+      ],
+      "spot_checks": [
+        32000
+      ],
+      "token_id_mismatch_observed": false
+    }
+  },
+  "not_promoted": [
+    "/completion",
+    "uniform scoring",
+    "external-helper scoring",
+    "native server quality-gate policy flags as canonical interface",
+    "general/canonical PFlash",
+    "real KVFlash mutation"
+  ],
+  "artifacts": {
+    "cp028_raw_chat_kwargs": {
+      "artifact": "temp-cp029-option-a-cp028-chat-kwargs-20260630T000325Z/cp029-option-a-cp028_chat_kwargs_comparison.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 3,
+        "direct_passed": 3,
+        "raw_pflash_passed": 3,
+        "direct_total_wall_s": 198.52,
+        "raw_pflash_total_wall_s": 20.933,
+        "speedup_vs_direct": 9.48
+      }
+    },
+    "cp029_robustness_matrix": {
+      "artifact": "temp-cp029-option-a-cp029-critical-line-robustness-20260630T000719Z/cp029-option-a-cp029_critical_line_robustness.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 27,
+        "passed": 27,
+        "failed": 0,
+        "debug_exports": 27,
+        "debug_all_values_in_compressed": 27
+      }
+    },
+    "cp029_32k_spot": {
+      "artifact": "temp-cp029-option-a-long32k-critical-line-robustness-20260630T002558Z/cp029-option-a-long32k_critical_line_robustness.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 1,
+        "passed": 1,
+        "failed": 0,
+        "debug_exports": 1,
+        "debug_all_values_in_compressed": 1
+      }
+    },
+    "cp029_uniform_negative": {
+      "artifact": "temp-cp029-option-a-uniform-critical-line-robustness-20260630T002654Z/cp029-option-a-uniform_critical_line_robustness.json",
+      "status": "fail",
+      "aggregate": {
+        "cases": 1,
+        "passed": 0,
+        "failed": 1,
+        "debug_exports": 1,
+        "debug_all_values_in_compressed": 0
+      }
+    },
+    "cp029_external_helper_negative": {
+      "artifact": "temp-cp029-option-a-external-helper-critical-line-robustness-20260630T002709Z/cp029-option-a-external-helper_critical_line_robustness.json",
+      "status": "fail",
+      "aggregate": {
+        "cases": 1,
+        "passed": 0,
+        "failed": 1,
+        "debug_exports": 1,
+        "debug_all_values_in_compressed": 0
+      }
+    },
+    "cp024_completion_mixed": {
+      "artifact": "temp-cp024-completions-sanity-20260630T001042Z/cp024_completions_comparison.json",
+      "status": "not_applicable",
+      "aggregate": {
+        "cases": 3,
+        "direct_passed": 1,
+        "raw_pflash_passed": 1,
+        "two_pass_verify_passed": 2,
+        "note": "mixed /completion evidence, not promoted"
+      }
+    },
+    "cp030_matrix": {
+      "artifact": "temp-cp030-matrix-2pass-quality-gate-20260630T005152Z/cp030-matrix_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 3,
+        "direct_passed": 3,
+        "pflash_first_passed": 3,
+        "smart_2pass_passed": 3,
+        "second_passes": 0,
+        "direct_total_wall_s": 201.531,
+        "pflash_total_wall_s": 21.513,
+        "smart_total_wall_s": 21.513,
+        "smart_speedup_vs_direct": 9.37
+      }
+    },
+    "cp030_32k_spot": {
+      "artifact": "temp-cp030-long32k-2pass-quality-gate-20260630T005551Z/cp030-long32k_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 1,
+        "direct_passed": 1,
+        "pflash_first_passed": 1,
+        "smart_2pass_passed": 1,
+        "second_passes": 0,
+        "direct_total_wall_s": 144.019,
+        "pflash_total_wall_s": 12.97,
+        "smart_total_wall_s": 12.97,
+        "smart_speedup_vs_direct": 11.1
+      }
+    },
+    "cp030_forced_fallback": {
+      "artifact": "temp-cp030-review-followup-forced-2pass-quality-gate-20260630T010556Z/cp030-review-followup-forced_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 1,
+        "direct_passed": 1,
+        "pflash_first_passed": 1,
+        "smart_2pass_passed": 1,
+        "second_passes": 1,
+        "direct_total_wall_s": 32.892,
+        "pflash_total_wall_s": 4.279,
+        "smart_total_wall_s": 14.109,
+        "smart_speedup_vs_direct": 2.33
+      }
+    },
+    "cp031_qwen35_08b_scorer_q4km_matrix": {
+      "artifact": "temp-cp031-qwen35-08b-q4km-scorer-ab-2pass-quality-gate-20260630T022834Z/cp031-qwen35-08b-q4km-scorer-ab_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 3,
+        "smart_2pass_passed": 3,
+        "smart_2pass_failed": 0,
+        "second_passes": 3,
+        "token_id_mismatch": false,
+        "model_loaded": true
+      }
+    },
+    "cp031_qwen35_08b_scorer_bf16_matrix": {
+      "artifact": "temp-cp031-qwen35-08b-bf16-scorer-ab-2pass-quality-gate-20260630T022313Z/cp031-qwen35-08b-bf16-scorer-ab_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 3,
+        "smart_2pass_passed": 3,
+        "smart_2pass_failed": 0,
+        "second_passes": 3,
+        "token_id_mismatch": false,
+        "model_loaded": true
+      }
+    },
+    "cp031_qwen35_08b_scorer_q4km_32k": {
+      "artifact": "temp-cp031-qwen35-08b-q4km-scorer-ab-32k-2pass-quality-gate-20260630T024551Z/cp031-qwen35-08b-q4km-scorer-ab-32k_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 1,
+        "smart_2pass_passed": 1,
+        "smart_2pass_failed": 0,
+        "second_passes": 1,
+        "direct_wall_s": 142.128,
+        "pflash_wall_s": 47.786,
+        "smart_total_wall_s": 58.187,
+        "compressed_prompt_tokens": 3211,
+        "original_prompt_tokens": 32100,
+        "token_id_mismatch": false,
+        "model_loaded": true
+      }
+    },
+    "cp031_qwen35_08b_scorer_bf16_32k": {
+      "artifact": "temp-cp031-qwen35-08b-bf16-scorer-ab-32k-2pass-quality-gate-20260630T024925Z/cp031-qwen35-08b-bf16-scorer-ab-32k_2pass_quality_gate.json",
+      "status": "ok",
+      "aggregate": {
+        "cases": 1,
+        "smart_2pass_passed": 1,
+        "smart_2pass_failed": 0,
+        "second_passes": 1,
+        "direct_wall_s": 144.387,
+        "pflash_wall_s": 49.554,
+        "smart_total_wall_s": 59.484,
+        "compressed_prompt_tokens": 3211,
+        "original_prompt_tokens": 32100,
+        "token_id_mismatch": false,
+        "model_loaded": true
+      }
+    }
+  }
+}
