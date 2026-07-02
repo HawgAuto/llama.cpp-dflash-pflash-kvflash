@@ -412,7 +412,7 @@ void common_params_print_info(const common_params & params, bool print_devices) 
         if (!params.pflash_model.empty()) {
             COM_INF("%s: experimental pflash_model = %s\n", __func__, params.pflash_model.c_str());
         }
-        COM_WRN("%s", "experimental PFlash/KVFlash runtime wiring is partial: PFlash compression/scoring and KVFlash resident-pool accounting are active, but page-level KVFlash recall remains experimental\n");
+        COM_WRN("%s", "experimental PFlash/KVFlash runtime wiring is active: PFlash compression/scoring and KVFlash resident-prefix admission, idle eviction, page-directory recall, and hidden-state restore are experimental\n");
     }
 }
 

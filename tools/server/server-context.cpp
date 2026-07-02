@@ -971,8 +971,8 @@ private:
         uint64_t hits = 0;
         uint64_t misses = 0;
         uint64_t evictions = 0;
-        uint64_t dry_run_scores = 0;
-        uint64_t dry_run_candidate_tokens = 0;
+        uint64_t admission_checks = 0;
+        uint64_t admission_candidate_tokens = 0;
         uint64_t simulated_eviction_checks = 0;
         uint64_t simulated_eviction_candidates = 0;
         uint64_t memory_mutations = 0;
@@ -1153,8 +1153,8 @@ private:
                 {"hits",            kvflash_pool.hits},
                 {"misses",          kvflash_pool.misses},
                 {"evictions",       kvflash_pool.evictions},
-                {"dry_run_scores",  kvflash_pool.dry_run_scores},
-                {"dry_run_candidate_tokens", kvflash_pool.dry_run_candidate_tokens},
+                {"admission_checks", kvflash_pool.admission_checks},
+                {"admission_candidate_tokens", kvflash_pool.admission_candidate_tokens},
                 {"simulated_eviction_checks", kvflash_pool.simulated_eviction_checks},
                 {"simulated_eviction_candidates", kvflash_pool.simulated_eviction_candidates},
                 {"memory_mutations", kvflash_pool.memory_mutations},
@@ -3387,8 +3387,11 @@ private:
     }
 
     bool kvflash_hidden_state_restore_enabled() const {
+        if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0) {
+            return false;
+        }
         const char * env = std::getenv("LLAMA_KVFLASH_HIDDEN_STATE_RESTORE");
-        return env && env[0] != '\0' && !(env[0] == '0' && env[1] == '\0');
+        return env == nullptr || env[0] == '\0' || (env[0] != '0' || env[1] != '\0');
     }
 
     void kvflash_trace_cp039a_slot(const server_slot & slot, const char * stage, size_t n_save = 0) const {
@@ -3541,7 +3544,7 @@ private:
         for (auto & it : kvflash_hidden_prefixes) {
             kvflash_hidden_prefix_record & record = it.second;
             const llama_tokens & prefix = record.prefix;
-            if (record.data.main.empty() || prefix.empty() || prefix.size() > input_tokens.size()) {
+            if (record.data.main.empty() || prefix.empty() || prefix.size() >= input_tokens.size()) {
                 continue;
             }
             if (best && prefix.size() <= best->prefix.size()) {
@@ -3635,10 +3638,6 @@ private:
             removed_resident_tokens = std::min<uint64_t>(removed_resident_tokens, (uint64_t) kvflash_pool.resident_tokens);
             const uint64_t removed_pages = kvflash_pages_for_tokens(removed_resident_tokens);
             kvflash_remember_hidden_prefix(slot, removed_resident_tokens);
-            common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
-            if (ctx_dft) {
-                common_context_seq_rm(ctx_dft.get(), slot.id, -1, -1);
-            }
             slot.prompt_clear(false);
             slot.kvflash_resident_tokens = 0;
             slot.kvflash_resident_pages = 0;
@@ -3655,7 +3654,7 @@ private:
         return mutated;
     }
 
-    bool maybe_score_kvflash_dry_run(const server_task & task) {
+    bool maybe_apply_kvflash_admission(const server_task & task) {
         if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0) {
             return false;
         }
@@ -3680,15 +3679,15 @@ private:
         const int64_t simulated_overflow =
             (int64_t) kvflash_pool.resident_tokens + (int64_t) candidate_tokens - (int64_t) kvflash_pool.capacity_tokens;
         const uint64_t simulated_eviction_candidates = simulated_overflow > 0 ? (uint64_t) simulated_overflow : 0;
-        kvflash_pool.dry_run_scores++;
-        kvflash_pool.dry_run_candidate_tokens += candidate_tokens;
+        kvflash_pool.admission_checks++;
+        kvflash_pool.admission_candidate_tokens += candidate_tokens;
         kvflash_pool.simulated_eviction_checks++;
         kvflash_pool.simulated_eviction_candidates += simulated_eviction_candidates;
         if (recalled_tokens == 0) {
             kvflash_pool.misses++;
         }
 
-        SRV_DBG("experimental KVFlash dry-run score: task=%d tokens=%zu candidate_tokens=%" PRIu64 " recalled_tokens=%" PRIu64 " simulated_eviction_candidates=%" PRIu64 " policy=%s tau=%d active=true\n",
+        SRV_DBG("experimental KVFlash admission: task=%d tokens=%zu candidate_tokens=%" PRIu64 " recalled_tokens=%" PRIu64 " simulated_eviction_candidates=%" PRIu64 " policy=%s tau=%d active=true\n",
                 task.id, src.size(), candidate_tokens, recalled_tokens, simulated_eviction_candidates, params_base.kvflash_policy.c_str(), params_base.kvflash_tau);
         return true;
     }
@@ -3711,6 +3710,7 @@ private:
         auto it = kvflash_pending_hints.find(task_id);
         if (it == kvflash_pending_hints.end()) {
             slot.kvflash_resident_tokens = 0;
+            slot.kvflash_resident_pages = 0;
             return;
         }
         const uint64_t hinted = std::min<uint64_t>(it->second, (uint64_t) kvflash_pool.capacity_tokens);
@@ -3724,6 +3724,40 @@ private:
         kvflash_pool.resident_pages += slot.kvflash_resident_pages;
         SRV_DBG("experimental PFlash->KVFlash residency hint assigned: task=%d slot=%d hinted_tokens=%" PRIu64 " hinted_pages=%d resident_tokens=%d resident_pages=%" PRIu64 " active=true\n",
                 task_id, slot.id, hinted, slot.kvflash_resident_pages, kvflash_pool.resident_tokens, kvflash_pool.resident_pages);
+    }
+
+    void kvflash_commit_prompt_residency(server_slot & slot) {
+        if (!kvflash_pool.initialized || params_base.kvflash_tokens == 0 || !slot.task) {
+            return;
+        }
+        if (slot.task->type != SERVER_TASK_TYPE_COMPLETION && slot.task->type != SERVER_TASK_TYPE_INFILL) {
+            return;
+        }
+        if (slot.prompt.tokens.has_mtmd || slot.prompt.n_tokens() == 0) {
+            return;
+        }
+        const uint64_t resident = std::min<uint64_t>(
+            (uint64_t) slot.prompt.n_tokens(),
+            (uint64_t) std::max(0, params_base.kvflash_tokens));
+        if (resident == 0 || slot.kvflash_resident_tokens > 0) {
+            return;
+        }
+
+        maybe_apply_kvflash_idle_evictions(resident);
+
+        const uint64_t available = (uint64_t) std::max(0, kvflash_pool.capacity_tokens - kvflash_pool.resident_tokens);
+        const uint64_t assigned = std::min(resident, available);
+        if (assigned == 0) {
+            return;
+        }
+
+        slot.kvflash_resident_tokens = (int32_t) assigned;
+        slot.kvflash_resident_pages = (int32_t) kvflash_pages_for_tokens(assigned);
+        kvflash_pool.entries++;
+        kvflash_pool.resident_tokens += slot.kvflash_resident_tokens;
+        kvflash_pool.resident_pages += slot.kvflash_resident_pages;
+        SRV_DBG("experimental KVFlash committed prompt residency: slot=%d tokens=%" PRIu64 " pages=%d resident_tokens=%d resident_pages=%" PRIu64 " active=true\n",
+                slot.id, assigned, slot.kvflash_resident_pages, kvflash_pool.resident_tokens, kvflash_pool.resident_pages);
     }
 
     bool maybe_apply_pflash_prompt_compression(server_task & task) {
@@ -3841,7 +3875,7 @@ private:
                         }
                     }
 
-                    maybe_score_kvflash_dry_run(task);
+                    maybe_apply_kvflash_admission(task);
                     maybe_apply_pflash_prompt_compression(task);
 
                     const int id_task = task.id;
@@ -5101,9 +5135,10 @@ private:
                 }
             }
         }
-        if (kvflash_hidden_state_restore_enabled()) {
+        if (kvflash_pool.initialized) {
             for (auto & slot : slots) {
                 if (slot.state == SLOT_STATE_DONE_PROMPT) {
+                    kvflash_commit_prompt_residency(slot);
                     kvflash_maybe_snapshot_prompt_state(slot);
                 }
             }

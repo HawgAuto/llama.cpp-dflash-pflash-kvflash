@@ -3,7 +3,7 @@
 This is a custom inference-server fork built on top of `llama.cpp`. The custom work in this repository is focused on:
 
 - proving PFlash prompt-token compression can be routed through the llama-server task path;
-- proving KVFlash configuration, observability, dry-run scoring, and eviction-pressure accounting can be surfaced safely without mutating the real KV cache;
+- implementing KVFlash resident-prefix admission, idle-slot KV eviction, page-directory recall, and hidden-state restore for repeated prompt prefixes;
 - providing an OpenAI-compatible smart router for selecting direct, PFlash, and verification paths across llama-server backends.
 
 DFlash speculative decoding is also used by this fork, but it came with the llama.cpp base. The work here does not claim to invent DFlash. It uses the upstream DFlash/speculative path as one serving mode to compare against and combine with the PFlash, KVFlash, and router experiments.
@@ -36,31 +36,34 @@ Limitations:
 - PFlash is experimental and must be benchmarked per workload.
 - Aggressive compression can drop facts. Exact extraction, code patching, schema output, and all/every/list style prompts should use a direct path or a PFlash-then-direct-verify path.
 
-### KVFlash observability and dry-run residency accounting
+### KVFlash resident-prefix cache
 
-KVFlash is the KV-cache-side experiment added by this fork. The current implementation is intentionally safe: it observes and scores candidate residency behavior without changing the real llama.cpp KV cache.
+KVFlash is the KV-cache-side experiment added by this fork. It now moves beyond accounting-only scaffolding: configured prompts are admitted into a resident-prefix budget, idle slot KV state can be evicted when new candidates need space, and evicted prefixes are retained in a page directory for later recall and optional state restoration.
 
 Current capabilities:
 
 - Adds configuration fields such as `--kvflash`, `--kvflash-policy`, `--kvflash-tau`, and `--kvflash-drafter`.
 - Reports KVFlash configuration in `/props`.
-- Maintains an inert `resident_pool` status object with capacity, resident-token accounting fields, hit/miss counters, dry-run scoring counters, candidate-token counters, and simulated eviction-pressure counters.
-- Runs dry-run scoring at the server task boundary when KVFlash is configured.
-- Simulates whether a prompt candidate would exceed the configured resident-token budget.
-- Exposes the accounting surface needed to evaluate policies before any real KV-cache mutation is attempted.
+- Maintains a live `resident_pool` status object with capacity, resident tokens/pages, hit/miss counters, admission counters, eviction counters, mutation counters, hidden-prefix descriptors, and hidden-state restore counters.
+- Runs an admission pass at the server task boundary for completion and infill prompts.
+- Commits successfully-prefilled prompts into the resident pool, bounded by `--kvflash`.
+- Evicts idle slot KV state when resident-token pressure exceeds the configured pool.
+- Records evicted prefix pages so repeated future prompts can be detected as page-directory recall hits.
+- Captures hidden sequence state for eligible text-only prompts and restores matching hidden prefixes by default on later requests. Set `LLAMA_KVFLASH_HIDDEN_STATE_RESTORE=0` to disable this restore path.
+- Integrates with PFlash hints so compressed prompts can advertise the resident span that should be tracked by KVFlash.
 
-What KVFlash currently does not do:
+What KVFlash changes in server behavior:
 
-- It does not allocate a separate real resident KV pool.
-- It does not evict, page, recall, clear, or mutate llama.cpp KV cache state.
-- It does not change attention masks or generation behavior.
-- It does not claim a speedup by itself in the current dry-run state.
+- It can clear real llama.cpp KV state for idle slots when admitting new resident candidates.
+- It can restore a matching hidden prefix from saved sequence state and skip reprocessing that restored prefix.
+- It does not allocate a separate low-level KV tensor arena; residency is implemented at the server slot and sequence-state layer on top of llama.cpp memory APIs.
+- It does not rewrite attention kernels or sparse attention masks. The page directory is used for recall/accounting and state restore, not for a custom attention kernel.
 
-What KVFlash is for right now:
+What KVFlash is for:
 
-- proving the server can carry KVFlash policy/configuration cleanly;
-- making residency and eviction-pressure decisions observable from a live server;
-- creating a safe measurement scaffold before enabling risky real KV-cache residency changes.
+- reducing repeated-prefix prefill work across requests that share a resident prefix;
+- forcing idle-slot KV reclamation under a configured resident-token budget;
+- measuring page-level recall, hidden-state restore, and eviction pressure from a live server.
 
 ### DFlash speculative decoding
 
@@ -119,7 +122,7 @@ Typical flow:
 1. Build the repository for the target hardware.
 2. Start a direct llama-server backend.
 3. Start a PFlash-enabled backend when testing prompt compression.
-4. Configure KVFlash flags when collecting residency/dry-run accounting.
+4. Configure KVFlash flags when testing resident-prefix admission, idle-slot eviction, and hidden-state restore.
 5. Use DFlash/speculative flags only as supported by the inherited llama.cpp base.
 6. Run the smart router when OpenAI-compatible clients need one endpoint that chooses among those paths.
 7. Compare logs, `/props`, benchmark JSON, routing decisions, and output quality.
@@ -130,7 +133,7 @@ Exact flags depend on the backend, model, and experiment. Treat PFlash and KVFla
 
 This fork is built on top of [llama.cpp](https://github.com/ggml-org/llama.cpp) and [ggml](https://github.com/ggml-org/ggml). The base runtime, hardware backends, model loading, build system, server foundation, examples, upstream DFlash/speculative decoding support, and upstream documentation are credited to the llama.cpp and ggml authors and remain under the upstream MIT license.
 
-Special thanks and credit go to **Lucebox** for the PFlash and KVFlash research/prototyping lineage that informed the prompt-compression and KV-cache-residency work in this repository. The custom proof work here is PFlash integration, KVFlash observability/dry-run residency accounting, and the OpenAI-compatible router layered on top of llama.cpp.
+Special thanks and credit go to **Lucebox** for the PFlash and KVFlash research/prototyping lineage that informed the prompt-compression and KV-cache-residency work in this repository. The custom proof work here is PFlash integration, KVFlash resident-prefix admission and recall, and the OpenAI-compatible router layered on top of llama.cpp.
 
 See [`NOTICE.md`](NOTICE.md) for attribution and license details.
 
