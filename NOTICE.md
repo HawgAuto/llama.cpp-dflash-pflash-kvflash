@@ -1,6 +1,6 @@
 # Notices, attribution, and thanks
 
-This repository is a custom server-focused fork of `llama.cpp` with experimental PFlash, DFlash, and KVFlash integration work layered on top.
+This repository is a custom server-focused fork of `llama.cpp` with experimental PFlash and KVFlash integration work plus OpenAI-compatible router tooling layered on top.
 
 ## Upstream project
 
@@ -17,7 +17,7 @@ Special thanks and credit go to **Lucebox** for the PFlash and KVFlash research/
 This repository includes experimental server work around:
 
 - PFlash-style prompt compression hooks and token-flow experiments.
-- DFlash-style speculative decoding integration and observability.
-- KVFlash-style cache-residency controls, status reporting, dry-run scoring, candidate-token accounting, and eviction-related counters.
+- KVFlash-style cache-residency configuration, status reporting, dry-run scoring, candidate-token accounting, and simulated eviction-pressure counters.
+- OpenAI-compatible router tooling for selecting direct, PFlash, and verification paths across llama-server backends.
 
-Those experimental directions are credited to the Lucebox PFlash/KVFlash lineage. The implementation in this repository is integration and experimentation work layered on top of `llama.cpp`; it is not represented as upstream `llama.cpp` functionality unless and until accepted upstream.
+Those PFlash and KVFlash experimental directions are credited to the Lucebox lineage. DFlash/speculative decoding support is inherited from the upstream `llama.cpp` base and is used here as an integration and comparison mode, not claimed as custom invention by this repository. The implementation in this repository is integration and experimentation work layered on top of `llama.cpp`; it is not represented as upstream `llama.cpp` functionality unless and until accepted upstream.
