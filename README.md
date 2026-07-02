@@ -117,6 +117,18 @@ Custom-work entry points:
 
 Build it as a llama.cpp fork, then run the server configurations needed for the experiment being tested.
 
+### EVO-X2 canonical validation models
+
+The EVO-X2 validation stack uses these local GGUF artifacts as the canonical model roles for this fork:
+
+| Role | Local path | Notes |
+|---|---|---|
+| Target/base model | `/home/hawg/experiments/lucebox-campaign-20260627/models/target-unsloth/Qwen3.6-27B-Q4_K_M.gguf` | Qwen3.6 27B Q4_K_M non-MTP target. Use this as `-m`. |
+| DFlash drafter | `/home/hawg/models/z-lab-Qwen3.6-27B-DFlash/qwen3.6-27b-dflash-zlab-q8_0.gguf` | Z-Lab Qwen3.6 27B DFlash drafter. Use this as `-md` with `--spec-type draft-dflash`. Do not use it as the target model. |
+| PFlash scorer | `/home/hawg/models/draft/Qwen3.5-0.8B-Q4_K_M.gguf` | Qwen3.5 0.8B Q4_K_M scorer model. Use this as `--pflash-model` with `--pflash-score model`. |
+
+Do not substitute the MTP-directory Qwen3.6 file for the target when validating the non-MTP path. The target above is the canonical non-MTP Qwen3.6 27B Q4_K_M artifact for this server's DFlash/PFlash validation.
+
 Typical flow:
 
 1. Build the repository for the target hardware.
